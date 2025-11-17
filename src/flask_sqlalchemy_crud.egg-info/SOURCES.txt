@@ -1,9 +1,0 @@
-README.md
-pyproject.toml
-src/flask_sqlalchemy_crud/__init__.py
-src/flask_sqlalchemy_crud/core.py
-src/flask_sqlalchemy_crud.egg-info/PKG-INFO
-src/flask_sqlalchemy_crud.egg-info/SOURCES.txt
-src/flask_sqlalchemy_crud.egg-info/dependency_links.txt
-src/flask_sqlalchemy_crud.egg-info/requires.txt
-src/flask_sqlalchemy_crud.egg-info/top_level.txt
