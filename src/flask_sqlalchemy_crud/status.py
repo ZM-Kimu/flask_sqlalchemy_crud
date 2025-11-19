@@ -1,3 +1,5 @@
+"""SQLAlchemy 操作状态枚举。"""
+
 from enum import IntEnum
 
 

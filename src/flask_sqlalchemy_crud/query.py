@@ -1,4 +1,4 @@
-from __future__ import annotations
+"""对 SQLAlchemy Query 的轻量包装，提供类型友好的 CRUDQuery 接口。"""
 
 from functools import wraps
 from typing import (
@@ -23,7 +23,9 @@ if TYPE_CHECKING:  # 仅用于类型检查，避免运行时循环依赖
 _E = TypeVar("_E")
 
 
-class CRUDQuery(Generic[ModelTypeVar, ResultTypeVar]):
+class CRUDQuery(
+    Generic[ModelTypeVar, ResultTypeVar]
+):  # pylint: disable=missing-function-docstring
     """Query 包装器。
 
     - 保留 SQLAlchemy 原生 Query 功能，同时增加类型提示与链式体验。

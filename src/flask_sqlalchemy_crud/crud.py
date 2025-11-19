@@ -1,11 +1,10 @@
+"""CRUD 辅助与事务集成实现。"""
+
 from __future__ import annotations
 
 import logging
-from functools import wraps
 from typing import (
-    Any,
     Generic,
-    Literal,
     Optional,
     Self,
     cast,
@@ -26,6 +25,7 @@ from .types import ErrorLogger, ModelTypeVar, SessionLike
 from .transaction import (
     ErrorPolicy,
     TransactionDecorator,
+    _TxnState,
     _get_or_create_txn_state,
     _get_txn_state,
     get_current_error_policy,
@@ -35,7 +35,7 @@ from .transaction import (
 P = ParamSpec("P")
 R = TypeVar("R")
 
-_error_logger: ErrorLogger = logging.getLogger("CRUD").error
+_DEFAULT_LOGGER: ErrorLogger = logging.getLogger("CRUD").error
 
 
 def _get_session_for_cls(crud_cls: type["CRUD"]) -> SessionLike:
@@ -52,7 +52,7 @@ def _get_session_for_cls(crud_cls: type["CRUD"]) -> SessionLike:
     return cast(SessionLike, session)
 
 
-class CRUD(Generic[ModelTypeVar]):
+class CRUD(Generic[ModelTypeVar]):  # pylint: disable=too-many-instance-attributes
     """通用 CRUD 封装。
 
     - 基于上下文管理器的事务提交/回滚。
@@ -63,6 +63,7 @@ class CRUD(Generic[ModelTypeVar]):
     _global_filter_conditions: tuple[list, dict] = ([], {})
     session: SessionLike | None = None
     _default_error_policy: ErrorPolicy = "raise"
+    _logger: ErrorLogger = _DEFAULT_LOGGER
 
     @classmethod
     def register_global_filters(cls, *base_exprs, **base_kwargs) -> None:
@@ -70,6 +71,7 @@ class CRUD(Generic[ModelTypeVar]):
         cls._global_filter_conditions = (list(base_exprs) or []), (base_kwargs or {})
 
     def __init__(self, model: type[Model], **kwargs) -> None:
+        """初始化 CRUD 实例。"""
         self._model = model
         self._kwargs = kwargs
 
@@ -84,7 +86,7 @@ class CRUD(Generic[ModelTypeVar]):
         self._need_commit = False
         self._error_policy: ErrorPolicy | None = None
         self._apply_global_filters = True
-        self._txn_state = None
+        self._txn_state: _TxnState | None = None
         self._joined_txn = False
         self._sub_txn = None
         self._explicit_committed = False
@@ -106,6 +108,7 @@ class CRUD(Generic[ModelTypeVar]):
         return self._default_error_policy
 
     def __enter__(self) -> Self:
+        """进入上下文管理器并加入/创建事务域。"""
         assert self.session is not None
         session = self.session
 
@@ -142,14 +145,14 @@ class CRUD(Generic[ModelTypeVar]):
         if session is not None:
             cls.session = session
         if error_logger is not None:
-            global _error_logger
-            _error_logger = error_logger
+            cls._logger = error_logger
 
     def config(
         self,
         error_policy: ErrorPolicy | None = None,
         disable_global_filter: bool | None = None,
     ) -> Self:
+        """配置当前 CRUD 实例的行为。"""
         if error_policy is not None:
             self._error_policy = error_policy
         if disable_global_filter is not None:
@@ -163,6 +166,7 @@ class CRUD(Generic[ModelTypeVar]):
             cls._default_error_policy = error_policy
 
     def create_instance(self, no_attach: bool = False) -> ModelTypeVar:
+        """创建或返回当前绑定的模型实例。"""
         if no_attach:
             return cast(ModelTypeVar, self._model(**self._kwargs))
         if self.instance is None:
@@ -183,6 +187,7 @@ class CRUD(Generic[ModelTypeVar]):
     def add(
         self, instances: ModelTypeVar | list[ModelTypeVar] | None = None, **kwargs
     ) -> list[ModelTypeVar] | ModelTypeVar | None:
+        """新增一条或多条记录，并可选择更新字段。"""
         try:
             instances = instances or self.create_instance()
             if not isinstance(instances, list):
@@ -200,7 +205,7 @@ class CRUD(Generic[ModelTypeVar]):
                     need_merge = (not insp.transient) or (
                         bound_sess is not None and bound_sess is not self.session
                     )
-                except Exception:
+                except Exception:  # pylint: disable=broad-exception-caught
                     need_merge = True
 
                 assert self.session is not None
@@ -216,6 +221,8 @@ class CRUD(Generic[ModelTypeVar]):
 
             assert self.session is not None
             self.session.add_all(managed_instances)
+            # 立即 flush，以便为调用方提供主键等数据库生成字段
+            self.session.flush()
             self._need_commit = True
             self._mark_dirty()
             return (
@@ -223,16 +230,17 @@ class CRUD(Generic[ModelTypeVar]):
                 if len(managed_instances) == 1
                 else managed_instances
             )
-        except SQLAlchemyError as e:
-            self._on_sql_error(e)
-        except Exception as e:
-            self.error = e
+        except SQLAlchemyError as exc:
+            self._on_sql_error(exc)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self.error = exc
             self.status = SQLStatus.INTERNAL_ERR
         return None
 
     def query(
         self, *args, pure: bool = False, **kwargs
     ) -> CRUDQuery[ModelTypeVar, ModelTypeVar]:
+        """构造带有默认过滤条件的查询对象。"""
         query = cast(Query, self._model.query)
         if not pure:
             if self._instance_default_kwargs:
@@ -249,18 +257,19 @@ class CRUD(Generic[ModelTypeVar]):
                 final_query = final_query.filter(*args)
             if kwargs:
                 final_query = final_query.filter_by(**kwargs)
-        except SQLAlchemyError as e:
-            self._on_sql_error(e)
-            self._log(e, self.status)
-        except Exception as e:
-            self.error = e
+        except SQLAlchemyError as exc:
+            self._on_sql_error(exc)
+            self._log(exc, self.status)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self.error = exc
             self.status = SQLStatus.INTERNAL_ERR
-            self._log(e, self.status)
+            self._log(exc, self.status)
         return CRUDQuery(self, final_query)
 
     def first(
         self, query: CRUDQuery[ModelTypeVar, ModelTypeVar] | None = None
     ) -> ModelTypeVar | None:
+        """执行查询并返回首条记录。"""
         if query is None:
             query = self.query()
         return query.first()
@@ -268,6 +277,7 @@ class CRUD(Generic[ModelTypeVar]):
     def all(
         self, query: CRUDQuery[ModelTypeVar, ModelTypeVar] | None = None
     ) -> list[ModelTypeVar]:
+        """执行查询并返回所有记录。"""
         if query is None:
             query = self.query()
         return query.all()
@@ -275,6 +285,7 @@ class CRUD(Generic[ModelTypeVar]):
     def update(
         self, instance: ModelTypeVar | None = None, **kwargs
     ) -> ModelTypeVar | None:
+        """更新单条记录的字段值。"""
         try:
             if instance is None:
                 instance = self.query().first()
@@ -290,10 +301,10 @@ class CRUD(Generic[ModelTypeVar]):
             self._need_commit = True
             self._mark_dirty()
             return instance
-        except SQLAlchemyError as e:
-            self._on_sql_error(e)
-        except Exception as e:
-            self.error = e
+        except SQLAlchemyError as exc:
+            self._on_sql_error(exc)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self.error = exc
             self.status = SQLStatus.INTERNAL_ERR
         return None
 
@@ -304,6 +315,7 @@ class CRUD(Generic[ModelTypeVar]):
         all_records: bool = False,
         sync: _orm_types.SynchronizeSessionArgument = "fetch",
     ) -> bool:
+        """删除单条或多条记录。"""
         try:
             assert self.session is not None
             if instance:
@@ -327,19 +339,21 @@ class CRUD(Generic[ModelTypeVar]):
             self._need_commit = True
             self._mark_dirty()
             return True
-        except SQLAlchemyError as e:
-            self._on_sql_error(e)
-        except Exception as e:
-            self.error = e
+        except SQLAlchemyError as exc:
+            self._on_sql_error(exc)
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self.error = exc
             self.status = SQLStatus.INTERNAL_ERR
         return False
 
     def need_commit(self) -> None:
+        """标记当前上下文在退出时需要提交事务。"""
         self._ensure_sub_txn()
         self._need_commit = True
         self._mark_dirty()
 
     def commit(self) -> None:
+        """显式提交当前子事务或会话。"""
         try:
             assert self.session is not None
             if self._sub_txn and getattr(self._sub_txn, "is_active", False):
@@ -348,12 +362,17 @@ class CRUD(Generic[ModelTypeVar]):
                 self.session.commit()
             self._explicit_committed = True
             self._need_commit = False
-        except Exception as e:
-            _error_logger(f"CRUD commit failed: {e}")
+        except Exception as exc:  # pylint: disable=broad-exception-caught
+            self._logger("CRUD commit failed: %s", exc)
             if self.session is not None:
                 self.session.rollback()
 
     def discard(self) -> None:
+        """显式回滚当前事务，并标记上下文为已丢弃。
+
+        - 不向外抛出异常，由调用方自行继续后续逻辑。
+        - 仅通过 `_discarded` 标记告知 __exit__ 执行回滚。
+        """
         try:
             assert self.session is not None
             if self._sub_txn and getattr(self._sub_txn, "is_active", False):
@@ -361,15 +380,20 @@ class CRUD(Generic[ModelTypeVar]):
             else:
                 self.session.rollback()
         finally:
-            self.error = AssertionError("User called rollback.")
             self._need_commit = False
             self._discarded = True
 
     def _log(self, error: Exception, status: SQLStatus = SQLStatus.INTERNAL_ERR):
+        """记录一条与当前模型相关的错误日志。"""
         model_name = getattr(self._model, "__name__", str(self._model))
-        _error_logger(f"CRUD[{model_name}]: <catch: {error}> <except: ({status})>")
+        self._logger(
+            "CRUD[%s]: <catch: %s> <except: (%s)>",
+            model_name,
+            error,
+            status,
+        )
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(self, exc_type, exc_val, exc_tb) -> None:  # pylint: disable=too-many-branches,too-many-nested-blocks
         # 对于非 SQLAlchemy 异常，始终向外抛出；
         # SQLAlchemyError 的抛出与否由 error_policy 决定，
         # 在事务装饰器或 _on_sql_error 中处理。
@@ -382,22 +406,26 @@ class CRUD(Generic[ModelTypeVar]):
             if should_rollback:
                 if has_exc or self.error:
                     model_name = getattr(self._model, "__name__", str(self._model))
-                    _error_logger(
-                        f"CRUD[{model_name}]: <catch: {self.error}> "
-                        f"<except: ({exc_type}: {exc_val})>"
+                    self._logger(
+                        "CRUD[%s]: <catch: %s> <except: (%s: %s)>",
+                        model_name,
+                        self.error,
+                        exc_type,
+                        exc_val,
                     )
                 try:
                     if self._sub_txn and getattr(self._sub_txn, "is_active", False):
                         self._sub_txn.rollback()
-                except Exception:
-                    pass
+                except Exception:  # pylint: disable=broad-exception-caught
+                    # 子事务回滚失败时记录错误并继续走顶层回滚逻辑。
+                    self._logger("CRUD sub-txn rollback failed", exc_info=True)
                 self._need_commit = False
             elif self._need_commit and not self._explicit_committed:
                 try:
                     if self._sub_txn and getattr(self._sub_txn, "is_active", False):
                         self._sub_txn.commit()
-                except Exception as e:
-                    _error_logger(f"CRUD commit failed: {e}")
+                except Exception as exc:  # pylint: disable=broad-exception-caught
+                    self._logger("CRUD sub-txn commit failed: %s", exc)
                     raise
 
             # 基于通用事务状态机调整深度，并在最外层执行提交/回滚
@@ -420,23 +448,27 @@ class CRUD(Generic[ModelTypeVar]):
                                 and not joined_existing
                             ):
                                 session.commit()
-                        except Exception as e:
-                            _error_logger(f"CRUD commit/rollback failed: {e}")
+                        except Exception as exc:  # pylint: disable=broad-exception-caught
+                            self._logger(
+                                "CRUD commit/rollback failed: %s",
+                                exc,
+                            )
                             try:
                                 session.rollback()
-                            except Exception:
+                            except Exception:  # pragma: no cover - 防御性回滚
                                 pass
-                            raise e
+                            raise
         finally:
             # Session 的生命周期由外部（如应用框架）负责管理。
-            return
+            pass
 
     def _ensure_sub_txn(self) -> None:
+        """确保当前存在一个活跃的子事务。"""
         if not (self._sub_txn and self._sub_txn.is_active):
             try:
                 assert self.session is not None
                 self._sub_txn = self.session.begin_nested()
-            except Exception:
+            except Exception:  # pylint: disable=broad-exception-caught
                 self._sub_txn = None
 
     def _mark_dirty(self) -> None:
@@ -444,6 +476,7 @@ class CRUD(Generic[ModelTypeVar]):
         return
 
     def _on_sql_error(self, e: Exception) -> None:
+        """处理 SQLAlchemyError，并根据策略决定是否抛出。"""
         self.error = e
         self.status = SQLStatus.SQL_ERR
         try:
@@ -452,8 +485,8 @@ class CRUD(Generic[ModelTypeVar]):
                 self._sub_txn.rollback()
             else:
                 self.session.rollback()
-        except Exception:
-            pass
+        except Exception:  # pylint: disable=broad-exception-caught
+            self._logger("CRUD SQL rollback failed", exc_info=True)
         self._need_commit = False
         # 仅当 error_policy 为 "raise" 时，对 SQLAlchemy 异常向外抛出，
         # 由事务装饰器或调用方统一处理。

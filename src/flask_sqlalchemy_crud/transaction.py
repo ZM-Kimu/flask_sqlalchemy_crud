@@ -1,7 +1,9 @@
+"""通用事务状态机与装饰器实现。"""
+
 from __future__ import annotations
 
 from contextvars import ContextVar
-from typing import Any, Callable, Dict, Literal, ParamSpec, TypeAlias, TypeVar, cast
+from typing import Callable, Dict, Literal, ParamSpec, TypeAlias, TypeVar, cast
 
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -170,14 +172,14 @@ def transaction(
                 try:
                     result = func(*args, **kwargs)
                     return result  # type: ignore[return-value]
-                except BaseException as exc:  # 包括 SQLAlchemyError 与其他异常
+                except BaseException as exc:  # pylint: disable=broad-exception-caught
                     captured_exc = exc
 
                     # 仅最外层事务负责执行数据库 rollback
                     if not joining_existing:
                         try:
                             session.rollback()
-                        except Exception:
+                        except Exception:  # pylint: disable=broad-exception-caught
                             # 回滚失败时不屏蔽原始异常
                             pass
 
@@ -204,11 +206,11 @@ def transaction(
                             if captured_exc is None and not joining_existing:
                                 try:
                                     session.commit()
-                                except Exception as commit_exc:
+                                except Exception as commit_exc:  # pylint: disable=broad-exception-caught
                                     # 提交失败时尝试回滚并抛出提交异常
                                     try:
                                         session.rollback()
-                                    except Exception:
+                                    except Exception:  # pragma: no cover - 防御性回滚
                                         pass
                                     raise commit_exc
             finally:
