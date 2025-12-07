@@ -1,29 +1,60 @@
-# Python / packaging
+# --- Python / packaging ---
 __pycache__/
 *.py[cod]
 *.pyo
 *.pyd
 
-# Virtual environments
+# Build artifacts
+build/
+dist/
+**/*.egg-info/
+*.whl
+wheelhouse/
+
+# Coverage / test
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+.pytest_cache/
+
+# Type checking / linters
+.mypy_cache/
+.pytype/
+.pyre/
+.ruff_cache/
+
+# Virtual envs
 .venv/
 venv/
 env/
+.env
+.env.*
+!.env.example
+.python-version
 
-# Build / dist
-build/
-dist/
-*.egg-info/
+# Tools / task runners
+.tox/
+.nox/
+.cache/
 
-# Tools / caches
-.mypy_cache/
-.pytest_cache/
-.coverage
-htmlcov/
+# Docs (Sphinx / MkDocs)
+docs/_build/
+site/
 
-# IDE / editor
+# Editors / IDEs
 .vscode/
 .idea/
 
-# Local configs
-.env
+# Notebooks / data noise
+.ipynb_checkpoints/
+*.log
 
+# OS noise
+.DS_Store
+Thumbs.db
+
+# Package managers (uncomment only if you definitely don't use them for this repo)
+poetry.lock
+pdm.lock
+Pipfile.lock
