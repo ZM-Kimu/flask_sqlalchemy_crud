@@ -30,6 +30,7 @@ def _cleanup_multi(app, db, *models) -> None:
 
 
 def test_crud_add_query_update_delete(app_and_db) -> None:
+    """End-to-end CRUD flow (create / query / update / delete) with Flask-SQLAlchemy."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
@@ -66,6 +67,7 @@ def test_crud_add_query_update_delete(app_and_db) -> None:
 
 
 def test_crud_transaction_decorator_join(app_and_db) -> None:
+    """Function-level transaction decorator should join inner CRUD scopes."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
@@ -87,7 +89,7 @@ def test_crud_transaction_decorator_join(app_and_db) -> None:
 
 
 def test_on_sql_error_respects_error_policy(app_and_db) -> None:
-
+    """CRUD._on_sql_error should respect per-instance error_policy."""
     app, db, User, _Profile = app_and_db
 
     with app.app_context():
@@ -105,7 +107,7 @@ def test_on_sql_error_respects_error_policy(app_and_db) -> None:
 
 
 def test_transaction_rollback_on_runtime_exception(app_and_db) -> None:
-    """外层事务内抛出非 SQLAlchemy 异常，应整体回滚。"""
+    """Non-SQLAlchemy exceptions should cause full rollback of the outer transaction."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
@@ -125,7 +127,7 @@ def test_transaction_rollback_on_runtime_exception(app_and_db) -> None:
 
 
 def test_nested_transaction_join_and_rollback(app_and_db) -> None:
-    """内外层装饰器 join 同一事务，外层异常导致整体回滚。"""
+    """Nested transaction decorators join the same transaction; outer failure rolls back all."""
     app, db, User, Profile = app_and_db
     _cleanup_multi(app, db, User, Profile)
 
@@ -153,7 +155,7 @@ def test_nested_transaction_join_and_rollback(app_and_db) -> None:
 
 
 def test_status_policy_rolls_back_without_raising(app_and_db) -> None:
-    """status 策略下 SQLAlchemyError 不抛出，但事务仍应回滚。"""
+    """With error_policy='status' SQLAlchemyError should be rolled back but not raised."""
 
     app, db, User, Profile = app_and_db
     _cleanup_multi(app, db, User, Profile)
@@ -176,7 +178,7 @@ def test_status_policy_rolls_back_without_raising(app_and_db) -> None:
 
 
 def test_discard_rolls_back_partial_operations(app_and_db) -> None:
-    """在同一事务中通过 discard 回滚部分操作。"""
+    """discard() should roll back part of operations within the same transaction scope."""
     app, db, User, Profile = app_and_db
     _cleanup_multi(app, db, User, Profile)
 
@@ -205,7 +207,7 @@ def test_discard_rolls_back_partial_operations(app_and_db) -> None:
 
 
 def test_query_count_order_by_group_by(app_and_db) -> None:
-    """测试 CRUDQuery 的 count / order_by / group_by 等常用链式操作。"""
+    """Exercise CRUDQuery count / order_by / group_by chaining behaviour."""
     app, db, User, Profile = app_and_db
     _cleanup_multi(app, db, User, Profile)
 
@@ -249,7 +251,7 @@ def test_query_count_order_by_group_by(app_and_db) -> None:
 
 
 def test_add_many_and_global_filters(app_and_db) -> None:
-    """覆盖 add_many 及全局过滤器的启用/禁用行为。"""
+    """Cover add_many and global filter enable/disable behaviour."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
@@ -289,7 +291,7 @@ def test_add_many_and_global_filters(app_and_db) -> None:
 
 
 def test_create_instance_and_explicit_commit(app_and_db) -> None:
-    """覆盖 create_instance(no_attach) 与显式 commit 的路径。"""
+    """Cover create_instance(no_attach) and explicit commit path."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
@@ -315,7 +317,7 @@ def test_create_instance_and_explicit_commit(app_and_db) -> None:
 
 
 def test_pure_query_and_all_records_delete(app_and_db) -> None:
-    """覆盖 query(pure=True) 以及 delete(all_records=True) 的分支。"""
+    """Cover query(pure=True) and delete(all_records=True) branches (ignore instance filters)."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
@@ -350,7 +352,7 @@ def test_pure_query_and_all_records_delete(app_and_db) -> None:
 
 
 def test_need_commit_marks_dirty_without_mutation(app_and_db) -> None:
-    """need_commit 应促使退出上下文时提交事务。"""
+    """need_commit() should cause commit on exit even without further mutations."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
@@ -366,7 +368,7 @@ def test_need_commit_marks_dirty_without_mutation(app_and_db) -> None:
 
 
 def test_error_policy_inherits_from_transaction_decorator(app_and_db) -> None:
-    """事务装饰器的 error_policy 应被 CRUD 实例继承并用于 _resolve_error_policy。"""
+    """error_policy from transaction decorator should be visible to CRUD._resolve_error_policy."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
@@ -389,7 +391,7 @@ def test_error_policy_inherits_from_transaction_decorator(app_and_db) -> None:
 
 
 def test_crud_conflicts_with_external_manual_transaction(app_and_db) -> None:
-    """外部已 begin 的事务未被 CRUD 状态机感知时，应触发冲突错误。"""
+    """Manual external session.begin() that is invisible to CRUD should cause a conflict error."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
@@ -409,7 +411,7 @@ def test_crud_conflicts_with_external_manual_transaction(app_and_db) -> None:
 def test_transaction_decorator_conflicts_with_external_manual_transaction(
     app_and_db,
 ) -> None:
-    """事务装饰器在外部手动 begin 时也会因重复 begin 抛出冲突。"""
+    """Transaction decorator combined with external manual begin should also conflict."""
     app, db, User, _Profile = app_and_db
     _cleanup_all(app, db, User)
 
