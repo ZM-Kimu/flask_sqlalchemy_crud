@@ -13,47 +13,54 @@ from typing import (
     TypeAlias,
     TypeVar,
     cast,
+    overload,
 )
 
+from sqlalchemy import delete as sa_delete
 from sqlalchemy import inspect as sa_inspect
+from sqlalchemy import select as sa_select
+from sqlalchemy import tuple_ as sa_tuple
+from sqlalchemy.engine import CursorResult, Result, ScalarResult
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Query, SessionTransaction, object_session
-from sqlalchemy.sql import _orm_types
+from sqlalchemy.orm import Mapper, SessionTransaction, object_session
+from sqlalchemy.sql import Select
+from sqlalchemy.sql.elements import ColumnElement
+from sqlalchemy.sql.selectable import TypedReturnsRows
 
-from .query import CRUDQuery
 from .status import SQLStatus
 from .transaction import (
     ErrorPolicy,
     ExistingTxnPolicy,
     TransactionDecorator,
-    _activate_txn_state,
-    _begin_session,
-    _get_txn_origin_name,
-    _get_txn_state,
-    _in_transaction,
-    _raise_existing_txn_error,
-    _reset_existing_txn,
-    _TxnState,
+    TxnState,
+    activate_txn_state,
+    begin_session,
     get_current_error_policy,
+    get_txn_origin_name,
+    get_txn_state,
+    in_transaction,
+    raise_existing_txn_error,
+    reset_existing_txn,
 )
 from .transaction import transaction as _txn_transaction
-from .types import ErrorLogger, ORMModel, QueryBuilder, SessionLike, SessionProvider
+from .types import ErrorLogger, ORMModel, SessionLike, SessionProvider
 
 P = ParamSpec("P")
 R = TypeVar("R")
 
 ModelTypeVar = TypeVar("ModelTypeVar", bound=ORMModel)
-ResultTypeVar_co = TypeVar("ResultTypeVar_co", covariant=True)
+RowTypeVar = TypeVar("RowTypeVar", bound=tuple[Any, ...])
+ScalarTypeVar = TypeVar("ScalarTypeVar")
+EntityTypeVar1 = TypeVar("EntityTypeVar1")
+EntityTypeVar2 = TypeVar("EntityTypeVar2")
+EntityTypeVar3 = TypeVar("EntityTypeVar3")
+EntityTypeVar4 = TypeVar("EntityTypeVar4")
+EntityTypeVar5 = TypeVar("EntityTypeVar5")
+EntityTypeVar6 = TypeVar("EntityTypeVar6")
+EntityTypeVar7 = TypeVar("EntityTypeVar7")
+EntityTypeVar8 = TypeVar("EntityTypeVar8")
 
 _DEFAULT_LOGGER: ErrorLogger = logging.getLogger("CRUD").error
-
-
-def _default_query_builder(
-    model: type[ModelTypeVar], session: SessionLike, crud: "CRUD[ModelTypeVar]"
-) -> CRUDQuery[ModelTypeVar, ModelTypeVar]:
-    """Build a query using plain SQLAlchemy Session (no Flask-SQLAlchemy dependency)."""
-    sa_query = session.query(model)
-    return CRUDQuery(crud, cast(Query, sa_query))
 
 
 class SessionProxy:
@@ -104,20 +111,19 @@ class CRUD(Generic[ModelTypeVar]):
     - Supports global and per-instance default filter conditions.
     """
 
-    _global_filter_conditions: ClassVar[tuple[list, dict]] = ([], {})
+    _global_filter_conditions: ClassVar[tuple[list[Any], dict[str, Any]]] = ([], {})
     _session_provider: ClassVar[tuple[SessionProvider] | None] = None
-    _query_builder: ClassVar[QueryBuilder | None] = None
     _default_error_policy: ClassVar[ErrorPolicy] = "raise"
     _existing_txn_policy: ClassVar[ExistingTxnPolicy] = "error"
     _logger: ClassVar[ErrorLogger] = _DEFAULT_LOGGER
 
     @classmethod
-    def register_global_filters(cls, *base_exprs, **base_kwargs) -> None:
+    def register_global_filters(cls, *base_exprs: Any, **base_kwargs: Any) -> None:
         """Register global base filters applied to all models.
 
         Args:
-            *base_exprs: Positional filter expressions passed to ``Query.filter``.
-            **base_kwargs: Keyword-style filters passed to ``Query.filter_by``.
+            *base_exprs: Positional filter expressions passed to ``Select.where``.
+            **base_kwargs: Keyword-style filters passed to ``Select.filter_by``.
         """
         cls._global_filter_conditions = (list(base_exprs) or []), (base_kwargs or {})
 
@@ -127,14 +133,16 @@ class CRUD(Generic[ModelTypeVar]):
         Args:
             model: ORM model class this CRUD instance operates on.
             **kwargs: Default filter/initialization kwargs bound to this
-                instance (used by ``query()`` and ``create_instance()``).
+                instance (used by ``select()`` and ``create_instance()``).
         """
         self._model = model
         self._kwargs = kwargs
 
-        self._base_filter_exprs: list = list(self._global_filter_conditions[0])
-        self._base_filter_kwargs: dict = dict(self._global_filter_conditions[1])
-        self._instance_default_kwargs: dict = dict(kwargs)
+        self._base_filter_exprs: list[Any] = list(self._global_filter_conditions[0])
+        self._base_filter_kwargs: dict[str, Any] = dict(
+            self._global_filter_conditions[1]
+        )
+        self._instance_default_kwargs: dict[str, Any] = dict(kwargs)
 
         self.error: Exception | None = None
         self.status: SQLStatus = SQLStatus.OK
@@ -142,7 +150,7 @@ class CRUD(Generic[ModelTypeVar]):
         self._need_commit = False
         self._error_policy: ErrorPolicy | None = None
         self._apply_global_filters = True
-        self._txn_state: _TxnState | None = None
+        self._txn_state: TxnState | None = None
         self._joined_existing = False
         self._nested_txn: SessionTransaction | None = None
         self._explicit_committed = False
@@ -168,10 +176,10 @@ class CRUD(Generic[ModelTypeVar]):
         """Enter the context manager and join or create a transaction scope."""
         session = self._get_session()
 
-        state = _get_txn_state(session)
+        state = get_txn_state(session)
         joined_existing = bool(state is not None and state.active)
-        in_txn = _in_transaction(session)
-        origin_name = _get_txn_origin_name(session) if in_txn else None
+        in_txn = in_transaction(session)
+        origin_name = get_txn_origin_name(session) if in_txn else None
 
         if joined_existing and not in_txn and state is not None:
             # Stale internal state; reset so policy can re-evaluate.
@@ -182,7 +190,7 @@ class CRUD(Generic[ModelTypeVar]):
             if in_txn:
                 policy = type(self)._existing_txn_policy
                 if policy == "error":
-                    _raise_existing_txn_error(policy=policy, origin=origin_name)
+                    raise_existing_txn_error(policy=policy, origin=origin_name)
                 if policy == "join":
                     joined_existing = True
                 elif policy == "savepoint":
@@ -190,9 +198,9 @@ class CRUD(Generic[ModelTypeVar]):
                     self._nested_txn = session.begin_nested()
                 elif policy == "adopt_autobegin":
                     if origin_name != "AUTOBEGIN":
-                        _raise_existing_txn_error(policy=policy, origin=origin_name)
+                        raise_existing_txn_error(policy=policy, origin=origin_name)
                 elif policy == "reset":
-                    _reset_existing_txn(
+                    reset_existing_txn(
                         session,
                         policy=policy,
                         origin=origin_name,
@@ -201,9 +209,9 @@ class CRUD(Generic[ModelTypeVar]):
                 else:
                     raise ValueError(f"Unsupported existing_txn_policy: {policy}")
 
-            state = _activate_txn_state(session)
+            state = activate_txn_state(session)
             if not (joined_existing or in_txn):
-                _begin_session(session, state)
+                begin_session(session, state)
 
         assert state is not None
         state.depth += 1
@@ -220,12 +228,11 @@ class CRUD(Generic[ModelTypeVar]):
         cls,
         *,
         session_provider: SessionProvider | None = None,
-        query_builder: QueryBuilder | None = None,
         logger: ErrorLogger | None = None,
         error_policy: ErrorPolicy | None = None,
         existing_txn_policy: ExistingTxnPolicy | None = None,
     ) -> None:
-        """Configure session provider, query builder, logger and defaults.
+        """Configure session provider, logger and defaults.
 
         This is a class-level configuration and must be called before using
         ``CRUD(...)``.
@@ -234,9 +241,6 @@ class CRUD(Generic[ModelTypeVar]):
             session_provider: Callable that returns a ``SessionLike``. This is
                 the preferred way to integrate with ``sessionmaker`` or custom
                 session management.
-            query_builder: Optional builder to construct a ``CRUDQuery`` (or
-                Query-like object) from ``(model, session)``. When omitted the
-                default builder uses ``session.query(model)``.
             logger: Optional logger callable used by CRUD to report internal
                 errors.
             error_policy: Default error policy (``\"raise\"`` or ``\"status\"``)
@@ -257,9 +261,6 @@ class CRUD(Generic[ModelTypeVar]):
 
         cls._session_provider = (session_provider,)
 
-        if query_builder is not None:
-            cls._query_builder = query_builder
-
         if logger is not None:
             cls._logger = logger
         if error_policy is not None:
@@ -278,14 +279,7 @@ class CRUD(Generic[ModelTypeVar]):
 
     def _get_session(self) -> SessionLike:
         provider = self._get_session_provider()
-        return cast(SessionLike, provider())
-
-    def _get_query_builder(self) -> QueryBuilder:
-        if self._query_builder is not None:
-            return cast(QueryBuilder, self._query_builder)
-        if type(self)._query_builder is not None:
-            return cast(QueryBuilder, type(self)._query_builder)
-        return lambda model, session: _default_query_builder(model, session, self)
+        return provider()
 
     def _require_session(self) -> SessionLike:
         if self._session is None:
@@ -423,107 +417,242 @@ class CRUD(Generic[ModelTypeVar]):
             self.status = SQLStatus.INTERNAL_ERR
         return None
 
-    def query(
-        self, *args, pure: bool = False, **kwargs
-    ) -> CRUDQuery[ModelTypeVar, ModelTypeVar]:
-        """Construct a query with default filter conditions applied.
+    @overload
+    def select(
+        self,
+        *,
+        pure: bool = False,
+        **kwargs: Any,
+    ) -> Select[tuple[ModelTypeVar]]: ...
 
-        Args:
-            *args: Additional positional filter criteria applied via
-                ``Query.filter``.
-            pure: When ``True``, ignore instance-level default filters (such as
-                kwargs passed to the CRUD constructor) and global filters
-                registered via ``register_global_filters``.
-            **kwargs: Additional keyword-style filter criteria applied via
-                ``Query.filter_by``.
-        Returns:
-            A ``CRUDQuery`` wrapping the underlying SQLAlchemy ``Query``.
+    @overload
+    def select(
+        self,
+        entity1: EntityTypeVar1,
+        *,
+        pure: bool = False,
+        **kwargs: Any,
+    ) -> Select[tuple[EntityTypeVar1]]: ...
+
+    @overload
+    def select(
+        self,
+        entity1: EntityTypeVar1,
+        entity2: EntityTypeVar2,
+        *,
+        pure: bool = False,
+        **kwargs: Any,
+    ) -> Select[tuple[EntityTypeVar1, EntityTypeVar2]]: ...
+
+    @overload
+    def select(
+        self,
+        entity1: EntityTypeVar1,
+        entity2: EntityTypeVar2,
+        entity3: EntityTypeVar3,
+        *,
+        pure: bool = False,
+        **kwargs: Any,
+    ) -> Select[tuple[EntityTypeVar1, EntityTypeVar2, EntityTypeVar3]]: ...
+
+    @overload
+    def select(
+        self,
+        entity1: EntityTypeVar1,
+        entity2: EntityTypeVar2,
+        entity3: EntityTypeVar3,
+        entity4: EntityTypeVar4,
+        *,
+        pure: bool = False,
+        **kwargs: Any,
+    ) -> Select[
+        tuple[EntityTypeVar1, EntityTypeVar2, EntityTypeVar3, EntityTypeVar4]
+    ]: ...
+
+    @overload
+    def select(
+        self,
+        entity1: EntityTypeVar1,
+        entity2: EntityTypeVar2,
+        entity3: EntityTypeVar3,
+        entity4: EntityTypeVar4,
+        entity5: EntityTypeVar5,
+        *,
+        pure: bool = False,
+        **kwargs: Any,
+    ) -> Select[
+        tuple[
+            EntityTypeVar1,
+            EntityTypeVar2,
+            EntityTypeVar3,
+            EntityTypeVar4,
+            EntityTypeVar5,
+        ]
+    ]: ...
+
+    @overload
+    def select(
+        self,
+        entity1: EntityTypeVar1,
+        entity2: EntityTypeVar2,
+        entity3: EntityTypeVar3,
+        entity4: EntityTypeVar4,
+        entity5: EntityTypeVar5,
+        entity6: EntityTypeVar6,
+        *,
+        pure: bool = False,
+        **kwargs: Any,
+    ) -> Select[
+        tuple[
+            EntityTypeVar1,
+            EntityTypeVar2,
+            EntityTypeVar3,
+            EntityTypeVar4,
+            EntityTypeVar5,
+            EntityTypeVar6,
+        ]
+    ]: ...
+
+    @overload
+    def select(
+        self,
+        entity1: EntityTypeVar1,
+        entity2: EntityTypeVar2,
+        entity3: EntityTypeVar3,
+        entity4: EntityTypeVar4,
+        entity5: EntityTypeVar5,
+        entity6: EntityTypeVar6,
+        entity7: EntityTypeVar7,
+        *,
+        pure: bool = False,
+        **kwargs: Any,
+    ) -> Select[
+        tuple[
+            EntityTypeVar1,
+            EntityTypeVar2,
+            EntityTypeVar3,
+            EntityTypeVar4,
+            EntityTypeVar5,
+            EntityTypeVar6,
+            EntityTypeVar7,
+        ]
+    ]: ...
+
+    @overload
+    def select(
+        self,
+        entity1: EntityTypeVar1,
+        entity2: EntityTypeVar2,
+        entity3: EntityTypeVar3,
+        entity4: EntityTypeVar4,
+        entity5: EntityTypeVar5,
+        entity6: EntityTypeVar6,
+        entity7: EntityTypeVar7,
+        entity8: EntityTypeVar8,
+        *,
+        pure: bool = False,
+        **kwargs: Any,
+    ) -> Select[
+        tuple[
+            EntityTypeVar1,
+            EntityTypeVar2,
+            EntityTypeVar3,
+            EntityTypeVar4,
+            EntityTypeVar5,
+            EntityTypeVar6,
+            EntityTypeVar7,
+            EntityTypeVar8,
+        ]
+    ]: ...
+
+    def select(
+        self,
+        *entities: Any,
+        pure: bool = False,
+        **kwargs: Any,
+    ) -> Select[Any]:
+        """Build a SQLAlchemy 2.x ``select`` statement.
+
+        When ``entities`` is empty, this builds ``select(self._model)``.
+        By default, instance-level and global base filters are applied; pass
+        ``pure=True`` to skip those defaults.
         """
-        session = self._require_session()
-        base_query = self._get_query_builder()(self._model, session)
-        query = cast(
-            Query, base_query.query if isinstance(base_query, CRUDQuery) else base_query
-        )
+        statement = sa_select(*entities) if entities else sa_select(self._model)
         if not pure:
             if self._instance_default_kwargs:
-                query = query.filter_by(**self._instance_default_kwargs)
+                statement = statement.filter_by(**self._instance_default_kwargs)
             if self._apply_global_filters:
                 if self._base_filter_exprs:
-                    query = query.filter(*self._base_filter_exprs)
+                    statement = statement.where(*self._base_filter_exprs)
                 if self._base_filter_kwargs:
-                    query = query.filter_by(**self._base_filter_kwargs)
+                    statement = statement.filter_by(**self._base_filter_kwargs)
+        if kwargs:
+            statement = statement.filter_by(**kwargs)
+        return cast(Select[Any], statement)
 
-        final_query = query
-        try:
-            if args:
-                final_query = final_query.filter(*args)
-            if kwargs:
-                final_query = final_query.filter_by(**kwargs)
-        except SQLAlchemyError as exc:
-            self._on_sql_error(exc)
-            self._log(exc, self.status)
-        except Exception as exc:
-            self.error = exc
-            self.status = SQLStatus.INTERNAL_ERR
-            self._log(exc, self.status)
-        return CRUDQuery(self, final_query)
+    def execute(
+        self,
+        statement: TypedReturnsRows[RowTypeVar],
+        *args: Any,
+        **kwargs: Any,
+    ) -> Result[RowTypeVar]:
+        """Execute a typed SQLAlchemy statement via the bound Session."""
+        session = self._require_session()
+        return session.execute(statement, *args, **kwargs)
+
+    def scalars(
+        self,
+        statement: TypedReturnsRows[tuple[ScalarTypeVar]],
+        *args: Any,
+        **kwargs: Any,
+    ) -> ScalarResult[ScalarTypeVar]:
+        """Execute a statement and return typed scalar results."""
+        session = self._require_session()
+        return session.scalars(statement, *args, **kwargs)
+
+    def scalar(
+        self,
+        statement: TypedReturnsRows[tuple[ScalarTypeVar]],
+        *args: Any,
+        **kwargs: Any,
+    ) -> ScalarTypeVar | None:
+        """Execute a statement and return a single typed scalar."""
+        session = self._require_session()
+        return session.scalar(statement, *args, **kwargs)
 
     def first(
-        self, query: CRUDQuery[ModelTypeVar, ModelTypeVar] | None = None
+        self, stmt: Select[tuple[ModelTypeVar]] | None = None
     ) -> ModelTypeVar | None:
-        """Execute a query and return the first record.
-
-        Args:
-            query: Optional existing ``CRUDQuery`` to execute. When ``None``,
-                this method internally calls ``self.query()``.
-        Returns:
-            The first matched model instance, or ``None`` if no record matches
-            or an error occurred and was handled according to ``error_policy``.
-        """
-        if query is None:
-            query = self.query()
-        return query.first()
+        """Return the first model instance matched by ``stmt`` or default filters."""
+        effective_stmt = stmt if stmt is not None else self.select()
+        return self.scalars(effective_stmt).first()
 
     def all(
-        self, query: CRUDQuery[ModelTypeVar, ModelTypeVar] | None = None
+        self, stmt: Select[tuple[ModelTypeVar]] | None = None
     ) -> list[ModelTypeVar]:
-        """Execute a query and return all records.
-
-        Args:
-            query: Optional existing ``CRUDQuery`` to execute. When ``None``,
-                this method internally calls ``self.query()``.
-        Returns:
-            A list of matched model instances (possibly empty). Errors are
-            handled according to the configured ``error_policy``.
-        """
-        if query is None:
-            query = self.query()
-        return query.all()
+        """Return all model instances matched by ``stmt`` or default filters."""
+        effective_stmt = stmt if stmt is not None else self.select()
+        return list(self.scalars(effective_stmt).all())
 
     def update(
-        self, instance: ModelTypeVar | None = None, **kwargs
+        self,
+        instance: ModelTypeVar | None = None,
+        *,
+        stmt: Select[tuple[ModelTypeVar]] | None = None,
+        **kwargs: Any,
     ) -> ModelTypeVar | None:
-        """Update a single record's field values.
-
-        Args:
-            instance: Specific instance to update. When ``None``, the method
-                first resolves an instance using ``self.query().first()``.
-            **kwargs: Field updates applied to the resolved instance.
-        Returns:
-            The updated instance when a target record was found and the update
-            succeeded; ``None`` when no target instance was found or when an
-            error occurred and was handled according to ``error_policy``.
-        """
+        """Update one record by instance or by a model ``Select`` statement."""
         try:
-            if instance is None:
-                instance = self.query().first()
-
-            if not instance:
+            target_instance = (
+                instance if instance is not None else self.first(stmt=stmt)
+            )
+            if target_instance is None:
+                self.status = SQLStatus.NOT_FOUND
                 return None
 
             session = self._require_session()
             self._ensure_nested_txn()
-            target = self._merge_if_needed(session, instance)
+            target = self._merge_if_needed(session, target_instance)
             self._apply_updates(session, target, kwargs)
             self._need_commit = True
             self._mark_dirty()
@@ -538,45 +667,72 @@ class CRUD(Generic[ModelTypeVar]):
     def delete(
         self,
         instance: ModelTypeVar | None = None,
-        query: CRUDQuery[ModelTypeVar, ModelTypeVar] | None = None,
+        *,
+        stmt: Select[tuple[ModelTypeVar]] | None = None,
         all_records: bool = False,
-        sync: _orm_types.SynchronizeSessionArgument = "fetch",
     ) -> bool:
-        """Delete a single record or multiple records.
-
-        Args:
-            instance: Concrete instance to delete. When provided, ``query`` and
-                ``all_records`` are ignored.
-            query: Optional query used to resolve records to delete when
-                ``instance`` is not provided.
-            all_records: When ``True``, delete all records matched by ``query``;
-                when ``False``, delete only the first matched record.
-            sync: Synchronization strategy passed through to SQLAlchemy's
-                ``Query.delete`` when ``all_records=True``.
-        Returns:
-            ``True`` if deletion was attempted and the transaction was marked
-            dirty; ``False`` when no target was found or an error occurred and
-            was handled according to the configured ``error_policy``.
-        """
+        """Delete one or many records by instance or a model ``Select`` statement."""
         try:
             session = self._require_session()
-            if instance:
+            if instance is not None:
                 self._ensure_nested_txn()
                 session.delete(instance)
             else:
-                if query is None:
-                    query = self.query()
-
-                first_inst = query.first()
-                if not first_inst:
-                    self.status = SQLStatus.NOT_FOUND
-                    return False
-
-                self._ensure_nested_txn()
+                effective_stmt = stmt if stmt is not None else self.select()
                 if all_records:
-                    query.delete(synchronize_session=sync)
+                    mapper = cast(Mapper[ModelTypeVar] | None, sa_inspect(self._model))
+                    if mapper is None:
+                        self.status = SQLStatus.INTERNAL_ERR
+                        return False
+
+                    primary_keys: list[ColumnElement[Any]] = [
+                        col for col in mapper.primary_key
+                    ]
+                    if not primary_keys:
+                        self.status = SQLStatus.INTERNAL_ERR
+                        return False
+
+                    primary_key_names: list[str] = []
+                    for pk in primary_keys:
+                        pk_key = getattr(pk, "key", None)
+                        if not isinstance(pk_key, str):
+                            self.status = SQLStatus.INTERNAL_ERR
+                            return False
+                        primary_key_names.append(pk_key)
+
+                    pk_source = effective_stmt.with_only_columns(
+                        *primary_keys
+                    ).subquery()
+                    if len(primary_keys) == 1:
+                        pk = primary_keys[0]
+                        source_pk = cast(
+                            ColumnElement[Any], pk_source.c[primary_key_names[0]]
+                        )
+                        delete_condition = pk.in_(sa_select(source_pk))
+                    else:
+                        model_pk = sa_tuple(*primary_keys)
+                        source_pk_cols: list[ColumnElement[Any]] = [
+                            cast(ColumnElement[Any], pk_source.c[pk_name])
+                            for pk_name in primary_key_names
+                        ]
+                        delete_condition = model_pk.in_(sa_select(*source_pk_cols))
+
+                    self._ensure_nested_txn()
+                    delete_stmt = sa_delete(self._model).where(delete_condition)
+                    delete_result = cast(
+                        CursorResult[Any], session.execute(delete_stmt)
+                    )
+                    deleted_rows = delete_result.rowcount or 0
+                    if deleted_rows == 0:
+                        self.status = SQLStatus.NOT_FOUND
+                        return False
                 else:
-                    session.delete(first_inst)
+                    target = self.scalars(effective_stmt).first()
+                    if target is None:
+                        self.status = SQLStatus.NOT_FOUND
+                        return False
+                    self._ensure_nested_txn()
+                    session.delete(target)
 
             self._need_commit = True
             self._mark_dirty()
@@ -651,7 +807,12 @@ class CRUD(Generic[ModelTypeVar]):
             status,
         )
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> None:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: Any,
+    ) -> None:
         # Non-SQLAlchemy exceptions are always re-raised.
         # Whether SQLAlchemyError is re-raised is controlled by ``error_policy``
         # and handled by the transaction decorator or ``_on_sql_error``.
@@ -692,7 +853,7 @@ class CRUD(Generic[ModelTypeVar]):
             # scope performs commit/rollback on the Session.
             if self._session is not None:
                 session = self._session
-                state = _get_txn_state(session)
+                state = get_txn_state(session)
                 joined_existing = getattr(self, "_joined_existing", False)
 
                 if state is not None and state.active:
@@ -739,7 +900,7 @@ class CRUD(Generic[ModelTypeVar]):
             bound_sess is not None and bound_sess is not session
         )
         if need_merge:
-            return cast(ModelTypeVar, session.merge(instance))
+            return session.merge(instance)
         return instance
 
     def _validate_update_fields(

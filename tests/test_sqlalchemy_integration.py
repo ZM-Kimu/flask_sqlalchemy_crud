@@ -3,7 +3,8 @@ import sys
 from typing import Generator
 
 import pytest
-from sqlalchemy import Column, Integer, String, create_engine
+from sqlalchemy import Column, Integer, String, create_engine, func
+from sqlalchemy import select as sa_select
 from sqlalchemy.orm import Session, declarative_base, sessionmaker
 
 ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
@@ -37,16 +38,13 @@ def sa_session() -> Generator[Session, None, None]:
 
 def test_pure_sqlalchemy_crud_basic(sa_session: Session) -> None:
     """Basic CRUD behaviour in a pure SQLAlchemy (non-Flask) setup."""
-
     CRUD.configure(session_provider=lambda: sa_session)
 
-    # 创建
     with CRUD(SAUser) as crud:
         user = crud.add(email="sa@example.com")
         assert user is not None
         assert user.id is not None
 
-    # 查询与更新
     with CRUD(SAUser, email="sa@example.com") as crud:
         found = crud.first()
         assert found is not None
@@ -56,20 +54,17 @@ def test_pure_sqlalchemy_crud_basic(sa_session: Session) -> None:
         assert updated is not None
         assert updated.email == "sa-updated@example.com"
 
-    # 删除
     with CRUD(SAUser, email="sa-updated@example.com") as crud:
         ok = crud.delete()
         assert ok is True
         assert crud.status == SQLStatus.OK
 
-    # 确认已删除
     with CRUD(SAUser, email="sa-updated@example.com") as crud:
         assert crud.first() is None
 
 
 def test_pure_sqlalchemy_transaction_join(sa_session: Session) -> None:
     """CRUD.transaction join semantics in a pure SQLAlchemy setup."""
-
     CRUD.configure(session_provider=lambda: sa_session)
 
     @CRUD.transaction()
@@ -82,33 +77,26 @@ def test_pure_sqlalchemy_transaction_join(sa_session: Session) -> None:
     create_two()
 
     with CRUD(SAUser) as crud:
-        emails = {u.email for u in crud.query().all()}
+        emails = {u.email for u in crud.all()}
         assert "join-a@example.com" in emails
         assert "join-b@example.com" in emails
 
 
 def test_session_view_commit_and_rollback_redirect(sa_session: Session) -> None:
-    """Session view should allow advanced operations but redirect commit/rollback to CRUD."""
-
+    """Session view should allow advanced operations but redirect commit/rollback."""
     CRUD.configure(session_provider=lambda: sa_session)
 
-    # 测试 commit 重定向
     with CRUD(SAUser) as crud:
         crud.add(email="view-commit@example.com")
-        # 通过 session 视图调用 commit，应等价于 crud.commit()
         crud.session.commit()
 
-    # 记录应已提交（直接通过 Session 查询验证）
     assert sa_session.query(SAUser).count() == 1
-    # 确保没有遗留活动事务，避免下一次 begin 冲突
     sa_session.rollback()
 
-    # 测试 rollback 重定向到 discard：在同一事务中撤销新增
     with CRUD(SAUser) as crud:
         crud.add(email="view-rollback@example.com")
         crud.session.rollback()
 
-    # 第二条记录应被回滚，只剩一条（直接用 Session 查询）
     emails = {u.email for u in sa_session.query(SAUser).all()}
     assert "view-commit@example.com" in emails
     assert "view-rollback@example.com" not in emails
@@ -130,7 +118,6 @@ def test_existing_txn_policy_adopt_autobegin() -> None:
             user = crud.add(email="autobegin@example.com")
             assert user is not None
 
-        # Access after commit triggers an AUTOBEGIN transaction.
         _ = user.email
         assert session.in_transaction()
 
@@ -178,7 +165,7 @@ def test_reuse_crud_object_across_contexts_inserts_two_rows(sa_session: Session)
 
 
 def test_add_merges_before_updating_detached_source_object() -> None:
-    """add(instance=..., **kwargs) should update managed row, not mutate detached source."""
+    """add(instance=..., **kwargs) should update managed row, not detached source."""
     engine = create_engine("sqlite:///:memory:", echo=False, future=True)
     Base.metadata.create_all(engine)
     SessionLocal = sessionmaker(bind=engine, class_=Session, expire_on_commit=False)
@@ -218,47 +205,117 @@ def test_add_unknown_field_raises_attribute_error(sa_session: Session) -> None:
             crud.add(instance=source, typo_field="x")
 
 
-def test_paginate_without_flask_sqlalchemy(sa_session: Session) -> None:
-    """paginate() should work without Flask-SQLAlchemy-specific Query extensions."""
+def test_first_and_all_with_stmt(sa_session: Session) -> None:
     CRUD.configure(session_provider=lambda: sa_session, error_policy="raise")
 
     with CRUD(SAUser) as crud:
-        for idx in range(1, 6):
-            row = crud.add(email=f"page-{idx}@example.com")
-            assert row is not None
+        for idx in range(1, 4):
+            created = crud.add(email=f"stmt-{idx}@example.com")
+            assert created is not None
 
     with CRUD(SAUser) as crud:
-        page1 = crud.query().order_by(SAUser.id).paginate(page=1, per_page=2)
-        assert [u.email for u in page1.items] == [
-            "page-1@example.com",
-            "page-2@example.com",
+        stmt = crud.select().where(SAUser.email.like("stmt-%")).order_by(SAUser.id)
+        first = crud.first(stmt=stmt)
+        all_rows = crud.all(stmt=stmt)
+        assert first is not None
+        assert first.email == "stmt-1@example.com"
+        assert [u.email for u in all_rows] == [
+            "stmt-1@example.com",
+            "stmt-2@example.com",
+            "stmt-3@example.com",
         ]
-        assert page1.total == 5
-        assert page1.pages == 3
-        assert page1.has_prev is False
-        assert page1.has_next is True
-        assert page1.prev_num is None
-        assert page1.next_num == 2
 
-        page3 = crud.query().order_by(SAUser.id).paginate(page=3, per_page=2)
-        assert [u.email for u in page3.items] == ["page-5@example.com"]
-        assert page3.has_prev is True
-        assert page3.has_next is False
-        assert page3.prev_num == 2
-        assert page3.next_num is None
 
-        page2_no_count = crud.query().order_by(SAUser.id).paginate(
-            page=2,
-            per_page=2,
-            count=False,
+def test_update_and_delete_with_stmt(sa_session: Session) -> None:
+    CRUD.configure(session_provider=lambda: sa_session, error_policy="raise")
+
+    with CRUD(SAUser) as crud:
+        row = crud.add(email="stmt-target@example.com")
+        assert row is not None
+
+    with CRUD(SAUser) as crud:
+        update_stmt = crud.select().where(SAUser.email == "stmt-target@example.com")
+        updated = crud.update(stmt=update_stmt, email="stmt-updated@example.com")
+        assert updated is not None
+        assert updated.email == "stmt-updated@example.com"
+
+        missing = crud.update(
+            stmt=crud.select().where(SAUser.email == "missing@example.com"),
+            email="noop@example.com",
         )
-        assert [u.email for u in page2_no_count.items] == [
-            "page-3@example.com",
-            "page-4@example.com",
+        assert missing is None
+        assert crud.status == SQLStatus.NOT_FOUND
+
+    with CRUD(SAUser) as crud:
+        delete_stmt = crud.select().where(SAUser.email == "stmt-updated@example.com")
+        ok = crud.delete(stmt=delete_stmt)
+        assert ok is True
+        assert crud.first(delete_stmt) is None
+
+
+def test_delete_all_records_with_stmt(sa_session: Session) -> None:
+    CRUD.configure(session_provider=lambda: sa_session, error_policy="raise")
+
+    with CRUD(SAUser) as crud:
+        crud.add(email="bulk-1@example.com")
+        crud.add(email="bulk-2@example.com")
+        crud.add(email="keep@example.com")
+
+    with CRUD(SAUser) as crud:
+        delete_stmt = crud.select().where(SAUser.email.like("bulk-%"))
+        ok = crud.delete(stmt=delete_stmt, all_records=True)
+        assert ok is True
+
+    rows = sa_session.query(SAUser).order_by(SAUser.id).all()
+    assert [r.email for r in rows] == ["keep@example.com"]
+
+
+def test_sqlalchemy2_style_select_execute_scalars(sa_session: Session) -> None:
+    """CRUD should expose SQLAlchemy 2.x-style select/execute/scalars helpers."""
+    CRUD.configure(
+        session_provider=lambda: sa_session,
+        error_policy="raise",
+        existing_txn_policy="adopt_autobegin",
+    )
+
+    with CRUD(SAUser) as crud:
+        first = crud.add(email="new-api-a@example.com")
+        second = crud.add(email="new-api-b@example.com")
+        assert first is not None
+        assert second is not None
+
+    with CRUD(SAUser, email="new-api-a@example.com") as crud:
+        stmt_default = crud.select()
+        users_default = crud.scalars(stmt_default).all()
+        assert [u.email for u in users_default] == ["new-api-a@example.com"]
+
+        stmt_pure = crud.select(pure=True).order_by(SAUser.email)
+        users_pure = crud.scalars(stmt_pure).all()
+        assert [u.email for u in users_pure] == [
+            "new-api-a@example.com",
+            "new-api-b@example.com",
         ]
-        assert page2_no_count.total is None
-        assert page2_no_count.pages == 0
-        assert page2_no_count.has_prev is True
-        assert page2_no_count.has_next is True
-        assert page2_no_count.prev_num == 1
-        assert page2_no_count.next_num == 3
+
+        stmt_cols = crud.select(SAUser.id, SAUser.email).order_by(SAUser.id)
+        rows = crud.execute(stmt_cols).all()
+        assert len(rows) == 1
+        assert rows[0].email == "new-api-a@example.com"
+        assert isinstance(rows[0].id, int)
+
+        count_stmt = sa_select(func.count(SAUser.id))
+        scalar_val = crud.scalar(count_stmt)
+        assert scalar_val == 2
+
+
+def test_legacy_query_api_removed(sa_session: Session) -> None:
+    """Legacy query exports and methods should be removed in 2.0."""
+    CRUD.configure(session_provider=lambda: sa_session, error_policy="raise")
+
+    with CRUD(SAUser) as crud:
+        assert hasattr(crud, "query") is False
+
+    with pytest.raises(ImportError):
+        exec("from sqlalchemy_crud_tx import CRUDQuery", {})
+
+    with pytest.raises(ImportError):
+        exec("from sqlalchemy_crud_tx import PaginationResult", {})

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextvars import ContextVar
+from types import TracebackType
 from typing import Any, Literal, ParamSpec, TypeAlias, TypeVar, cast
 
 from sqlalchemy.exc import InvalidRequestError, SQLAlchemyError
@@ -25,7 +26,7 @@ ExistingTxnPolicy = Literal[
 TransactionDecorator: TypeAlias = Callable[[Callable[P, R]], Callable[P, R]]
 
 
-class _TxnState:
+class TxnState:
     """Transaction state associated with a single Session.
 
     Shared between the generic transaction state machine and CRUD contexts to
@@ -42,7 +43,7 @@ class _TxnState:
         self.active: bool = False  # whether there is an active transaction
 
 
-_TxnMap: TypeAlias = dict[int, _TxnState]
+_TxnMap: TypeAlias = dict[int, TxnState]
 
 _current_txn_map: ContextVar[_TxnMap] = ContextVar("_current_txn_map")
 _current_error_policy: ContextVar[ErrorPolicy | None] = ContextVar(
@@ -54,7 +55,7 @@ def _get_txn_map() -> _TxnMap:
     """Return the transaction state mapping for the current ContextVar scope.
 
     The mapping uses ``id(Session)`` as the key and stores the corresponding
-    ``_TxnState``.
+    ``TxnState``.
     """
     try:
         return _current_txn_map.get()
@@ -64,12 +65,12 @@ def _get_txn_map() -> _TxnMap:
         return mapping
 
 
-def _get_txn_state(session: SessionLike) -> _TxnState | None:
+def get_txn_state(session: SessionLike) -> TxnState | None:
     """Return the transaction state associated with a Session, if any."""
     return _get_txn_map().get(id(session))
 
 
-def _get_or_create_txn_state(session: SessionLike) -> _TxnState:
+def _get_or_create_txn_state(session: SessionLike) -> TxnState:
     """Get or create the transaction state for the given Session.
 
     The transaction state machine uses this structure to implement join/nested
@@ -79,7 +80,7 @@ def _get_or_create_txn_state(session: SessionLike) -> _TxnState:
     key = id(session)
     state = mapping.get(key)
     if state is None:
-        state = _TxnState(session)
+        state = TxnState(session)
         mapping[key] = state
     return state
 
@@ -104,7 +105,7 @@ def _resolve_session(session: SessionLike) -> Any:
     return session
 
 
-def _in_transaction(session: SessionLike) -> bool:
+def in_transaction(session: SessionLike) -> bool:
     """Safely check whether a Session is currently in a transaction."""
     session_obj = _resolve_session(session)
     try:
@@ -122,7 +123,7 @@ def _get_transaction(session: SessionLike) -> Any | None:
         return None
 
 
-def _get_txn_origin_name(session: SessionLike) -> str | None:
+def get_txn_origin_name(session: SessionLike) -> str | None:
     """Return the origin name for the current transaction, if available."""
     txn = _get_transaction(session)
     if txn is None:
@@ -145,7 +146,7 @@ def _has_pending_changes(session: SessionLike) -> bool:
         return False
 
 
-def _raise_existing_txn_error(
+def raise_existing_txn_error(
     *,
     policy: ExistingTxnPolicy,
     origin: str | None,
@@ -165,7 +166,7 @@ def _raise_existing_txn_error(
     )
 
 
-def _activate_txn_state(session: SessionLike) -> _TxnState:
+def activate_txn_state(session: SessionLike) -> TxnState:
     """Create or reset the transaction state for a Session."""
     state = _get_or_create_txn_state(session)
     state.depth = 0
@@ -173,7 +174,7 @@ def _activate_txn_state(session: SessionLike) -> _TxnState:
     return state
 
 
-def _begin_session(session: SessionLike, state: _TxnState) -> None:
+def begin_session(session: SessionLike, state: TxnState) -> None:
     """Begin a transaction and mark state inactive on failure."""
     try:
         session.begin()
@@ -182,12 +183,12 @@ def _begin_session(session: SessionLike, state: _TxnState) -> None:
         raise
 
 
-def _reset_existing_txn(
+def reset_existing_txn(
     session: SessionLike, *, policy: ExistingTxnPolicy, origin: str | None
 ) -> None:
     """Rollback an existing transaction if it is safe to do so."""
     if _has_pending_changes(session):
-        _raise_existing_txn_error(
+        raise_existing_txn_error(
             policy=policy,
             origin=origin,
             detail="Pending changes found; reset is unsafe.",
@@ -200,7 +201,7 @@ class _TxnContext:
 
     Currently only used as an internal helper:
     - obtains a Session via ``SessionProvider``;
-    - ensures there is a ``_TxnState`` associated with that Session.
+    - ensures there is a ``TxnState`` associated with that Session.
 
     Commit/rollback behaviour is handled by the generic ``transaction(...)``
     decorator.
@@ -211,7 +212,7 @@ class _TxnContext:
     def __init__(self, session_provider: SessionProvider) -> None:
         self._session_provider = session_provider
         self._session: SessionLike | None = None
-        self._state: _TxnState | None = None
+        self._state: TxnState | None = None
 
     @property
     def session(self) -> SessionLike:
@@ -219,7 +220,7 @@ class _TxnContext:
         return self._session
 
     @property
-    def state(self) -> _TxnState | None:
+    def state(self) -> TxnState | None:
         return self._state
 
     def __enter__(self) -> "_TxnContext":
@@ -228,7 +229,12 @@ class _TxnContext:
         self._state = _get_or_create_txn_state(session)
         return self
 
-    def __exit__(self, exc_type, exc_val, exc_tb) -> Literal[False]:
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> Literal[False]:
         # Commit/rollback logic is handled by the generic transaction decorator;
         # this context itself never touches the database.
         return False
@@ -265,9 +271,9 @@ def transaction(
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             # Obtain Session and its transaction state mapping.
             session = session_provider()
-            state = _get_txn_state(session)
-            in_txn = _in_transaction(session)
-            origin_name = _get_txn_origin_name(session) if in_txn else None
+            state = get_txn_state(session)
+            in_txn = in_transaction(session)
+            origin_name = get_txn_origin_name(session) if in_txn else None
 
             if state is not None and state.active and not in_txn:
                 # Stale internal state; reset so policy can re-evaluate.
@@ -288,7 +294,7 @@ def transaction(
                 if not joining_existing:
                     if in_txn:
                         if existing_txn_policy == "error":
-                            _raise_existing_txn_error(
+                            raise_existing_txn_error(
                                 policy=existing_txn_policy, origin=origin_name
                             )
                         if existing_txn_policy == "join":
@@ -298,12 +304,12 @@ def transaction(
                             nested_txn = session.begin_nested()
                         elif existing_txn_policy == "adopt_autobegin":
                             if origin_name != "AUTOBEGIN":
-                                _raise_existing_txn_error(
+                                raise_existing_txn_error(
                                     policy=existing_txn_policy, origin=origin_name
                                 )
                             adopted_external = True
                         elif existing_txn_policy == "reset":
-                            _reset_existing_txn(
+                            reset_existing_txn(
                                 session,
                                 policy=existing_txn_policy,
                                 origin=origin_name,
@@ -315,12 +321,12 @@ def transaction(
                             )
 
                     if joining_existing or adopted_external:
-                        state = _activate_txn_state(session)
+                        state = activate_txn_state(session)
                         if adopted_external:
                             token = _current_error_policy.set(error_policy)
                     elif not in_txn:
-                        state = _activate_txn_state(session)
-                        _begin_session(session, state)
+                        state = activate_txn_state(session)
+                        begin_session(session, state)
                         token = _current_error_policy.set(error_policy)
 
                 assert state is not None

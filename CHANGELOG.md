@@ -1,3 +1,17 @@
+## v2.0.0 (2026-02-25)
+
+### BREAKING CHANGE
+
+- remove legacy Query core: `CRUD.query()`, `CRUDQuery`, and `configure(query_builder=...)`.
+- remove built-in pagination API and public `PaginationResult` export.
+- remove `delete(..., sync=...)` legacy Query-specific option.
+
+### Feat
+
+- switch to SQLAlchemy 2.x typed query path (`select/execute/scalars/scalar`).
+- keep `first/all` with model `Select` support via `stmt` parameter.
+- add pyright strict typing contracts and CI gate for `pytest + pyright`.
+
 ## v1.0.0 (2026-02-07)
 
 ### Fix

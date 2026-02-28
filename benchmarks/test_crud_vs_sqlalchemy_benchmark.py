@@ -4,6 +4,8 @@ import os
 from collections.abc import Callable
 
 import pytest
+from sqlalchemy import func
+from sqlalchemy import select as sa_select
 from sqlalchemy.orm import Session
 
 pytest.importorskip("pytest_benchmark")
@@ -15,7 +17,6 @@ pytestmark = pytest.mark.skipif(
 )
 
 from sqlalchemy_crud_tx import CRUD
-from sqlalchemy_crud_tx.pagination import paginate_query
 
 BATCH_SIZE = 50
 PAGE_SIZE = 20
@@ -112,7 +113,8 @@ def test_crud_get_by_email(
 ):
     def run() -> None:
         with CRUD(bench_user_model) as crud:
-            row = crud.query(email=seeded_user_email).first()
+            stmt = crud.select(email=seeded_user_email)
+            row = crud.first(stmt=stmt)
             if row is None:
                 raise RuntimeError("Seed row missing")
             crud.discard()
@@ -149,7 +151,8 @@ def test_crud_count_rows(
 
     def run() -> None:
         with CRUD(bench_user_model) as crud:
-            total = crud.query().count()
+            count_stmt = sa_select(func.count(bench_user_model.id))
+            total = crud.scalar(count_stmt)
             if total != expected:
                 raise RuntimeError(f"Expected {expected} rows, got {total}")
             crud.discard()
@@ -186,7 +189,7 @@ def test_crud_all_rows(
 
     def run() -> None:
         with CRUD(bench_user_model) as crud:
-            rows = crud.query().all()
+            rows = crud.all()
             if len(rows) != expected:
                 raise RuntimeError(f"Expected {expected} rows, got {len(rows)}")
             crud.discard()
@@ -205,14 +208,16 @@ def test_sa_paginate_page1(
     expected_first_page = min(expected, PAGE_SIZE)
 
     def run() -> None:
-        query = sa_session.query(bench_user_model).order_by(bench_user_model.email)
-        page = paginate_query(
-            query,
-            page=1,
-            per_page=PAGE_SIZE,
-            count=True,
+        total = sa_session.scalar(sa_select(func.count(bench_user_model.id)))
+        items = sa_session.scalars(
+            sa_select(bench_user_model)
+            .order_by(bench_user_model.email)
+            .limit(PAGE_SIZE)
+            .offset(0)
         )
-        if len(page.items) != expected_first_page:
+        if total != expected:
+            raise RuntimeError("Unexpected total")
+        if len(items.all()) != expected_first_page:
             raise RuntimeError("Unexpected page size")
         sa_session.rollback()
 
@@ -231,12 +236,12 @@ def test_crud_paginate_page1(
 
     def run() -> None:
         with CRUD(bench_user_model) as crud:
-            page = crud.query().order_by(bench_user_model.email).paginate(
-                page=1,
-                per_page=PAGE_SIZE,
-                count=True,
-            )
-            if len(page.items) != expected_first_page:
+            total = crud.scalar(sa_select(func.count(bench_user_model.id)))
+            items_stmt = crud.select().order_by(bench_user_model.email).limit(PAGE_SIZE)
+            items = crud.scalars(items_stmt).all()
+            if total != expected:
+                raise RuntimeError("Unexpected total")
+            if len(items) != expected_first_page:
                 raise RuntimeError("Unexpected page size")
             crud.discard()
 

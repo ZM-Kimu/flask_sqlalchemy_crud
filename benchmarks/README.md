@@ -35,11 +35,11 @@ Notes:
   `get by email`,
   `count`,
   `all`,
-  `paginate`,
+  `page-1 (count + limit + offset)`,
   `update(by id)`,
   `update(first)`,
   `delete(by id)`,
   `delete(by instance)`,
   `add_many`.
 - Mutation cases (`update` / `delete`) force an explicit `flush` on both SA and CRUD paths before rollback/discard, so SQL side effects are comparable.
-- Read/update/delete cases use the same query shape (`query(...).filter_by(id=...).first()`) for both paths.
+- Read/update/delete cases use equivalent SQLAlchemy 2.x statement shapes on both paths.

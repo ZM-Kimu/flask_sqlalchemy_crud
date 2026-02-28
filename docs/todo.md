@@ -1,175 +1,25 @@
-# sqlalchemy_crud_tx TODO 列表
+# sqlalchemy_crud_tx TODO（当前有效）
 
-> 作用：记录后续可以迭代的“高级玩法”与设计方向，避免在核心代码中堆积过多注释。  
-> 粗分为：**当前重构主线（3）** + **类型/事务增强（1/2）** + **工程化收尾（文档/测试）。**
-
----
-
-## 1. 列类型级别的强类型推导（长期 / 实验性质）
-
-- 目标：
-  - 从 SQLAlchemy 模型定义中推导/复用精确的 Python 类型（优先复用 `Mapped[T]` 注解，而不是复杂 runtime 分析）。
-  - 让 `CRUDQuery` 在 `with_entities` / `scalar` 等方法上具备“列级别”的类型推断能力。
-
-- 可能的技术方案：
-  - 定义 `TypedColumn[T]` 或 `InstrumentedAttr[T]` 协议，用于约束：
-    - `.type.python_type` / `.impl` 或其他可用的类型信息（仅在 `TYPE_CHECKING` 中使用）。
-  - `CRUDQuery` 使用两个类型参数：
-
-    ```python
-    TModel = TypeVar("TModel", bound=ORMModel)
-    TRow = TypeVar("TRow", covariant=True)
-
-    class CRUDQuery(Generic[TModel, TRow]): ...
-    # 默认 TRow = TModel
-    ```
-
-    示例：
-    - `CRUDQuery[User, User]`（默认全模型）
-    - `with_entities(User.id)` → `CRUDQuery[User, int]`
-    - `with_entities(User.id, User.name)` → `CRUDQuery[User, tuple[int, str]]`
-  - 定义精简版 `QueryLike` 协议，统一描述库内部实际用到的方法：
-    - `filter` / `filter_by` / `order_by` / `limit` / `offset` / `with_entities` / `scalar` / `one` 等，
-    - 降低对 SQLAlchemy 官方 stubs 的耦合度。
-
-- 兼容性与实现细节：
-  - 评估不同版本 SQLAlchemy / Flask-SQLAlchemy 的 stubs 差异。
-  - 初期仅在 `typing.TYPE_CHECKING` 分支中实现高级类型，运行时保持零成本。
-  - 该项为长期增强，不阻塞核心解耦与发布。
+> 本文件只保留与 SQLAlchemy 2.x 主路径一致的后续事项。  
+> 旧 `CRUDQuery/query/paginate` 路线已移除，不再作为维护方向。
 
 ---
 
-## 2. 更细粒度的事务与 Session 类型建模（增强）
+## 1. 2.x 查询类型推导（长期）
 
-- 为 `SessionLike` 增补：
-  - 对 `begin_nested` / `no_autoflush` 等上下文管理器方法的协议与测试用例。
-  - 限定 `SessionLike` 只包含库内部真正使用的方法（`add` / `delete` / `commit` / `rollback` / `begin` / `begin_nested` / `execute` / `scalar` 等），避免过宽协议。
-  - （可选）区分读写操作的类型标签（只读事务 vs 写事务）。
+- [ ] 继续收紧 `CRUD.select(...)` 多重重载（实体参数 0..8）在 Pyright strict 下的边界行为。
+- [ ] 为 `execute/scalars/scalar` 增加更多类型契约样例，覆盖聚合、列投影、空结果分支。
+- [ ] 明确 `Row` 命名属性访问仅为运行时能力，静态保证点保持在 tuple 位置类型。
 
-- 为 `CRUD.transaction` 装饰器定义类型安全接口：
-  - 使用 `ParamSpec` + `TypeVar`，保持装饰后的函数签名与原函数一致，而不是退化为 `Any`。
+## 2. 事务与 Session 类型建模（中期）
 
-    ```python
-    P = ParamSpec("P")
-    R = TypeVar("R")
+- [ ] 进一步收紧 `SessionLike` 协议，只保留库内部真实调用的方法。
+- [ ] 为 `CRUD.transaction` 的 `ParamSpec` 契约补充跨模块测试，确保装饰后签名不退化。
+- [ ] 评估是否提供独立 async 入口（若做，采用新 API 而非复用同步接口）。
 
-    @overload
-    def transaction(...) -> Callable[[Callable[P, R]], Callable[P, R]]: ...
-    ```
+## 3. 工程化收尾（中期）
 
-  - 明确目前仅支持同步函数，是否支持 async/`async_transaction` 作为后续议题。
+- [ ] 持续补齐公共 API docstring 的参数/返回语义。
+- [ ] 维护“常见误用排错”文档（缺失 configure、外部事务冲突、status_only 行为）。
+- [ ] 维持 `pytest + pyright` 门禁，避免回流旧查询核心符号。
 
-- （可选）研究使用 `contextvars` 存储当前事务上下文：
-  - 使嵌套 `CRUD.transaction` / `with CRUD(...)` 能安全复用同一 Session / 事务。
-  - 是否引入 savepoint / `Session.begin_nested` 的统一策略，待后续单独设计。
-
----
-
-## 3. CRUD 解耦与重构路线（当前主线，属 BREAKING CHANGE）
-
-### 3.1 核心接口与抽象（以 SQLAlchemy 为主线）✅（已完成）
-
-- Session 统一（必需）：  
-  - `SessionProvider = Callable[[], SessionLike]`，只能通过 provider 获取 Session，未配置 `_session_provider` 即在首次使用时抛 `RuntimeError`（强制要求 `CRUD.configure(session_provider=...)`）。  
-  - 弃用类属性 `session` 等旧入口，视为 BREAKING CHANGE。
-- Query 统一：  
-  - `QueryBuilder = Callable[[type[TModel], SessionLike], CRUDQuery[TModel, TRow]]`，查询与事务共用同一 Session。  
-  - 默认从 SQLAlchemy Session 构造，不再依赖 Flask-SQLAlchemy 的 `model.query` 作为主线。
-- `CRUD.configure` 规范（BREAKING）：  
-  - 仅接受 callable 形式的 `session_provider`，移除直接传 `session` 的快捷参数。  
-  - `query_builder` 可选覆盖；内部归一化为类级 `_session_provider` / `_query_builder`；未配置则报错并有测试。
-
-- 类型约束与基线：
-  - 使用最小 `ORMModel` 协议作为 `TModel` 上界，移除对 `flask_sqlalchemy.model.Model` 的硬依赖（BREAKING）。
-  - Python 基线锁定 3.11（不再提供 3.10 回退方案）。
-
-### 3.2 适配层与用法（Flask 作为可选 glue，而非主线）
-
-- 核心库仅依赖 SQLAlchemy；Flask 相关作为可选 glue，不是主线。
-- Flask 集成放在独立模块（如 `flask_integration.py`）中：  
-  - 提供 `configure_flask(db)` 等封装，内部通过 `db.session` + 默认 `QueryBuilder` 调用 `CRUD.configure`。
-  - 该模块中才导入 Flask/Flask-SQLAlchemy，核心模块不直接导入。
-- `pyproject.toml` 中通过 extras 管理 Flask 依赖：
-
-  ```toml
-  [project.optional-dependencies]
-  flask = ["flask>=2.3", "flask-sqlalchemy>=3.1"]
-  ```
-
-- 文档提供两套 quickstart：
-  - 主线：纯 SQLAlchemy（`sessionmaker` + 默认 `query_builder`）。
-  - 可选：Flask 集成示例（`configure_flask(db)`）。
-
-### 3.3 事务与行为（行为语义固定）
-
-- 保持现有 join/error_policy 语义：
-  - 嵌套装饰器/上下文的 join/savepoint 规则写清楚，并有对应测试。
-  - `error_policy` 的传递/覆盖行为文档化，并有测试。
-- 外部已 `begin` 的策略：
-  - 暂不改动，保持现状行为，待主线重构完成后再决策（记录为后续议题）。
-- 明确误用行为并固定预期：
-  - 未调用 `CRUD.configure` 的报错信息。
-  - 在 `CRUD.transaction` 中手动 `commit/rollback` 是否允许，若不允许则抛特定错误并测试。
-
-### 3.4 测试矩阵
-
-- 纯 SQLAlchemy 内存 SQLite 测试：
-  - CRUD 增删改查、事务 join/rollback、冲突/误用场景。
-- 保留/调整现有 Flask 集成测试：
-  - 确保可选适配层不回归；CI 中默认跑 SQLAlchemy 主线，并在安装 extras 的 job 中跑 Flask。
-- CI 配置：
-  - 至少覆盖 Python 3.11 / 3.12。
-  - 覆盖 SQLAlchemy 2.x 的一到两个主版本。
-  - Flask 集成测试放在单独 job（安装 `flask` extra）中运行，保证整体稳定性。
-- 误用场景测试文档化：
-  - 缺 `configure`、关闭 session 后复用、外部 begin 冲突、事务内部手动 commit/rollback 等。
-
-### 3.5 文档与迁移
-
-- README / README_zh：
-  - 明确两套用法（主线 SQLAlchemy + 可选 Flask），说明依赖拆分与 Python 基线。
-  - 给出旧版 vs 新版的对比代码片段，强调从“Flask-first”迁移到“SQLAlchemy-first”的设计变化。
-- 迁移说明 / CHANGELOG：
-  - `configure` 签名变化；
-  - SessionProvider / QueryBuilder 的默认行为；
-  - 依赖拆分（核心、extras）。
-- 对外 API 稳定性：
-  - 通过 `sqlalchemy_crud_tx.__all__` 固定公共导出（`CRUD`、`CRUDQuery`、`configure_flask` 等），内部模块结构可自由演进。
-
-### 3.6 实施顺序（建议）
-
-1) 落地 `_session_provider` / `_query_builder` 接口归一，保持现有行为通过测试。  
-2) 完善默认 `QueryBuilder`，确保 CRUD / query / transaction 共享 Session；调整类型定义。  
-3) 补充纯 SQLAlchemy 测试与示例，修正代码通过测试。  
-4) 添加 Flask 适配模块与文档更新（可选路径）。  
-5) 更新迁移文档、依赖声明与 CI/类型检查配置。  
-6) （长期）推进 1/2 中的高级 typing & 事务建模增强。  
-
----
-
-
-## 4. 细节层面的可读性与工具链友好度优化
-
-- 参数与返回值文档：
-  - 为关键公共方法补充/强化 docstring 中的参数说明（例如 ``CRUD.config``、``CRUD.add/add_many/update/delete`` 与事务相关入口），包括：
-    - 每个参数的含义与默认行为（例如 ``error_policy``、``disable_global_filter`` 等）；
-    - 返回值语义（何时返回 ``None``、何时抛错、何时仅更新内部状态）。
-  - 确保英文描述足够清晰，便于阅读与生成 API 文档。
-
-- Lint/pragma 清理：
-  - 在不牺牲可读性的前提下，逐步去掉不必要的 `# pylint: ...` / `# noqa: ...` 注释：
-    - 对于可以通过轻微重构解决的 warning（例如 ``too-many-branches``、``missing-function-docstring``），优先考虑代码层面拆分或补充 docstring。
-    - 对于确属设计需要的宽松点（如少量 ``broad-exception-caught``），保留最小必要的 pragma，并在附近用简短英文注释解释原因。
-  - 目标是让文件在默认 lint 配置下尽量“自然通过”，降低后续贡献者的心智负担。
-
-
-- 实施顺序（建议）：
-  1) 从 ``CRUD.config``、事务入口与主要 CRUD 方法开始补全参数/返回值说明。
-  2) 审视现有 pylint/noqa 注释，先移除明显多余的条目，观察 lint 结果。
-  3) 若 lint 仍有少量必要的禁用项，为这些位置补一行简短解释性注释，说明为何必须放宽规则。
-  4) 根据实际使用的 CI/lint 配置（若后续引入），同步调整这部分策略。 
-
-
-- 计划外但保留：`transaction(..., nested=...)` 参数目前仅作为未来嵌套事务 / SAVEPOINT 语义的占位符存在，暂不实现具体行为，后续单独设计与实现。
-
----

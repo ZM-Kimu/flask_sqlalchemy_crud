@@ -1,0 +1,18 @@
+{
+  "typeCheckingMode": "strict",
+  "useLibraryCodeForTypes": true,
+  "pythonVersion": "3.11",
+  "extraPaths": [
+    "src"
+  ],
+  "include": [
+    "src",
+    "tests",
+    "typing_contracts"
+  ],
+  "exclude": [
+    "**/__pycache__",
+    ".mypy_cache",
+    ".pytest_cache"
+  ]
+}

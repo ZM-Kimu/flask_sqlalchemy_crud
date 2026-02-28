@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import (
-    TYPE_CHECKING,
     Any,
     ClassVar,
     Protocol,
@@ -15,9 +14,6 @@ from typing import (
 
 from sqlalchemy.orm import Session as _Session
 from sqlalchemy.orm import scoped_session as _ScopedSession
-
-if TYPE_CHECKING:
-    from .query import CRUDQuery
 
 
 @runtime_checkable
@@ -32,7 +28,6 @@ class ORMModel(Protocol):
 
 
 ModelTypeVar = TypeVar("ModelTypeVar", bound=ORMModel)
-ResultTypeVar_co = TypeVar("ResultTypeVar_co", covariant=True)
 EntityTypeVar = TypeVar("EntityTypeVar")
 
 ErrorLogger = Callable[..., None]
@@ -43,6 +38,3 @@ ErrorLogger = Callable[..., None]
 SessionLike: TypeAlias = _Session | _ScopedSession[_Session]
 
 SessionProvider = Callable[[], SessionLike]
-QueryBuilder = Callable[
-    [type[ModelTypeVar], SessionLike], "CRUDQuery[ModelTypeVar, Any]"
-]

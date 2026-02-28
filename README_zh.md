@@ -3,7 +3,8 @@
 一个面向 SQLAlchemy 的轻量级 CRUD/事务辅助库：
 - `with CRUD(Model) as crud:` 提供上下文式 CRUD 与子事务
 - `@CRUD.transaction()` 支持 join 语义的函数级事务
-- 类型友好的 `CRUDQuery` 链式查询包装
+- 可配置错误策略（`error_policy="raise"|"status_only"`）和日志
+- SQLAlchemy 2.x 强类型查询入口（`select/execute/scalars/scalar`）
 
 ## 安装
 
@@ -12,6 +13,8 @@ pip install sqlalchemy-crud-tx
 # 或
 pip install -e .
 ```
+
+需要 Python 3.11+ 且 `sqlalchemy>=2.0`。
 
 ## 快速开始（纯 SQLAlchemy）
 
@@ -47,12 +50,52 @@ with CRUD(User, email="demo@example.com") as crud:
     row = crud.first()
     print("fetched", row)
 
-with CRUD(User) as d:
-    d.delete(row)
-# or 
-with CRUD(User, email="demo@example.com") as d:
-    d.delete()
+with CRUD(User) as crud:
+    updated = crud.update(row, email="updated@example.com")
+    print("updated", updated)
+
+with CRUD(User, email="updated@example.com") as crud:
+    crud.delete()
 ```
+
+## SQLAlchemy 2.x 查询风格（强类型）
+
+```python
+from sqlalchemy import select, func
+
+with CRUD(User, email="demo@example.com") as crud:
+    # 基于 CRUD 默认过滤条件构建 Select
+    stmt = crud.select().order_by(User.id)
+    users = crud.scalars(stmt).all()  # list[User]
+
+    # 列投影返回行对象（不是 ORM 模型实例）
+    rows = crud.execute(crud.select(User.id, User.email)).all()
+    first_email = rows[0].email
+
+    # 标量辅助
+    total = crud.scalar(select(func.count(User.id)))
+```
+
+## 2.0 破坏性变更
+
+`2.0.0` 已移除旧的 Query 路径：
+- 删除 `CRUD.query()`
+- 删除 `CRUDQuery`
+- 删除 `configure(query_builder=...)`
+- 删除内置分页 `paginate(...)`
+
+迁移对照：
+
+| 旧写法 | 新写法 |
+| --- | --- |
+| `crud.query().all()` | `crud.all()` 或 `crud.scalars(crud.select()).all()` |
+| `crud.query().filter(...).first()` | `crud.first(crud.select().where(...))` |
+| `crud.query().with_entities(User.id, User.email).all()` | `crud.execute(crud.select(User.id, User.email)).all()` |
+| `crud.query().order_by(...).paginate(...)` | 业务侧显式实现 `count + limit + offset` |
+
+类型说明：
+- 运行时常见的 `row.email` 访问通常可用。
+- 静态类型硬保证以 tuple 位置为准（如 `row[0]`, `row[1]`）。
 
 ## 函数级事务示例
 
@@ -91,6 +134,7 @@ create_two_users()
 ## 提示
 
 - 使用前请先调用 `CRUD.configure(session_provider=...)` 配置会话。
+- 类型检查基线以 Pylance/Pyright 的 `strict`（`pyrightconfig.json`）为准。
 - 如果 Session 可能已处于事务中（例如 `expire_on_commit` 触发 AUTOBEGIN），
   可通过 `CRUD.configure(existing_txn_policy=...)` 配置处理策略
   （`error`、`join`、`savepoint`、`adopt_autobegin`、`reset`）。
