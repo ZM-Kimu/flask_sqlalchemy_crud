@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
+from types import TracebackType
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -31,8 +33,6 @@ from .status import SQLStatus
 from .transaction import (
     ErrorPolicy,
     ExistingTxnPolicy,
-    TransactionDecorator,
-    TxnState,
     activate_txn_state,
     begin_session,
     get_current_error_policy,
@@ -150,7 +150,6 @@ class CRUD(Generic[ModelTypeVar]):
         self._need_commit = False
         self._error_policy: ErrorPolicy | None = None
         self._apply_global_filters = True
-        self._txn_state: TxnState | None = None
         self._joined_existing = False
         self._nested_txn: SessionTransaction | None = None
         self._explicit_committed = False
@@ -216,7 +215,6 @@ class CRUD(Generic[ModelTypeVar]):
         assert state is not None
         state.depth += 1
 
-        self._txn_state = state
         self._session = session
         self._joined_existing = joined_existing
         self._explicit_committed = False
@@ -243,7 +241,8 @@ class CRUD(Generic[ModelTypeVar]):
                 session management.
             logger: Optional logger callable used by CRUD to report internal
                 errors.
-            error_policy: Default error policy (``\"raise\"`` or ``\"status\"``)
+            error_policy: Default error policy
+                (``\"raise\"`` or ``\"status_only\"``)
                 applied when no transaction-scoped policy or per-instance
                 override is present.
             existing_txn_policy: How to handle sessions that already have an
@@ -367,7 +366,6 @@ class CRUD(Generic[ModelTypeVar]):
             session.add(target)
             session.flush()
             self._need_commit = True
-            self._mark_dirty()
             return target
         except SQLAlchemyError as exc:
             self._on_sql_error(exc)
@@ -408,7 +406,6 @@ class CRUD(Generic[ModelTypeVar]):
             session.add_all(managed_instances)
             session.flush()
             self._need_commit = True
-            self._mark_dirty()
             return managed_instances
         except SQLAlchemyError as exc:
             self._on_sql_error(exc)
@@ -655,7 +652,6 @@ class CRUD(Generic[ModelTypeVar]):
             target = self._merge_if_needed(session, target_instance)
             self._apply_updates(session, target, kwargs)
             self._need_commit = True
-            self._mark_dirty()
             return target
         except SQLAlchemyError as exc:
             self._on_sql_error(exc)
@@ -735,7 +731,6 @@ class CRUD(Generic[ModelTypeVar]):
                     session.delete(target)
 
             self._need_commit = True
-            self._mark_dirty()
             return True
         except SQLAlchemyError as exc:
             self._on_sql_error(exc)
@@ -753,7 +748,6 @@ class CRUD(Generic[ModelTypeVar]):
         """
         self._ensure_nested_txn()
         self._need_commit = True
-        self._mark_dirty()
 
     def commit(self) -> None:
         """Explicitly commit the current sub-transaction or Session.
@@ -811,7 +805,7 @@ class CRUD(Generic[ModelTypeVar]):
         self,
         exc_type: type[BaseException] | None,
         exc_val: BaseException | None,
-        exc_tb: Any,
+        exc_tb: TracebackType | None,
     ) -> None:
         # Non-SQLAlchemy exceptions are always re-raised.
         # Whether SQLAlchemyError is re-raised is controlled by ``error_policy``
@@ -923,11 +917,6 @@ class CRUD(Generic[ModelTypeVar]):
             for key, value in updates.items():
                 setattr(instance, key, value)
 
-    def _mark_dirty(self) -> None:
-        # The current transaction join/depth is managed by the shared
-        # transaction state machine; this is a placeholder for future hooks.
-        return
-
     def _on_sql_error(self, e: Exception) -> None:
         """Handle a ``SQLAlchemyError`` and optionally re-raise it."""
         self.error = e
@@ -953,8 +942,7 @@ class CRUD(Generic[ModelTypeVar]):
         error_policy: ErrorPolicy | None = None,
         join_existing: bool = True,
         existing_txn_policy: ExistingTxnPolicy | None = None,
-        # nested: bool | None = None,
-    ) -> TransactionDecorator[P, R]:
+    ) -> Callable[[Callable[P, R]], Callable[P, R]]:
         """Function-level transaction decorator.
 
         - One function call == one CRUD-related transaction scope.

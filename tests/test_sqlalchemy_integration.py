@@ -3,9 +3,15 @@ import sys
 from typing import Generator
 
 import pytest
-from sqlalchemy import Column, Integer, String, create_engine, func
+from sqlalchemy import Integer, String, create_engine, func
 from sqlalchemy import select as sa_select
-from sqlalchemy.orm import Session, declarative_base, sessionmaker
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    Session,
+    mapped_column,
+    sessionmaker,
+)
 
 ROOT_DIR = pathlib.Path(__file__).resolve().parents[1]
 SRC_DIR = ROOT_DIR / "src"
@@ -14,13 +20,15 @@ if str(SRC_DIR) not in sys.path:
 
 from sqlalchemy_crud_tx import CRUD, SQLStatus
 
-Base = declarative_base()
+
+class Base(DeclarativeBase):
+    pass
 
 
-class SAUser(Base):  # type: ignore[misc]
+class SAUser(Base):
     __tablename__ = "sa_user"
-    id = Column(Integer, primary_key=True)
-    email = Column(String(255), unique=True, nullable=False)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
 
 
 @pytest.fixture(scope="function")

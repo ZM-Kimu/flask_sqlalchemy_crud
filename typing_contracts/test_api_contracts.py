@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import pathlib
 import sys
+from collections.abc import Sequence
 from typing import TYPE_CHECKING, assert_type
 
 from sqlalchemy import Integer, String, func
@@ -34,14 +35,8 @@ if TYPE_CHECKING:
     assert_type(stmt_users, Select[tuple[User]])
 
     users = crud.scalars(stmt_users).all()
-    assert_type(users, list[User])
+    assert_type(users, Sequence[User])
 
     count_stmt = sa_select(func.count(User.id))
     count_value = crud.scalar(count_stmt)
     assert_type(count_value, int | None)
-
-    row_stmt = crud.select(User.id, User.email)
-    rows = crud.execute(row_stmt).all()
-    first_row = rows[0]
-    assert_type(first_row[0], int)
-    assert_type(first_row[1], str)

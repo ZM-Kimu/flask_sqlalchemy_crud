@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from contextvars import ContextVar
-from types import TracebackType
+from functools import wraps
 from typing import Any, Literal, ParamSpec, TypeAlias, TypeVar, cast
 
 from sqlalchemy.exc import InvalidRequestError, SQLAlchemyError
@@ -22,8 +22,6 @@ ExistingTxnPolicy = Literal[
     "adopt_autobegin",
     "reset",
 ]
-
-TransactionDecorator: TypeAlias = Callable[[Callable[P, R]], Callable[P, R]]
 
 
 class TxnState:
@@ -196,58 +194,13 @@ def reset_existing_txn(
     session.rollback()
 
 
-class _TxnContext:
-    """Basic building block for a transaction context manager.
-
-    Currently only used as an internal helper:
-    - obtains a Session via ``SessionProvider``;
-    - ensures there is a ``TxnState`` associated with that Session.
-
-    Commit/rollback behaviour is handled by the generic ``transaction(...)``
-    decorator.
-    """
-
-    __slots__ = ("_session_provider", "_session", "_state")
-
-    def __init__(self, session_provider: SessionProvider) -> None:
-        self._session_provider = session_provider
-        self._session: SessionLike | None = None
-        self._state: TxnState | None = None
-
-    @property
-    def session(self) -> SessionLike:
-        assert self._session is not None
-        return self._session
-
-    @property
-    def state(self) -> TxnState | None:
-        return self._state
-
-    def __enter__(self) -> "_TxnContext":
-        session = self._session_provider()
-        self._session = session
-        self._state = _get_or_create_txn_state(session)
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc_val: BaseException | None,
-        exc_tb: TracebackType | None,
-    ) -> Literal[False]:
-        # Commit/rollback logic is handled by the generic transaction decorator;
-        # this context itself never touches the database.
-        return False
-
-
 def transaction(
     session_provider: SessionProvider,
     *,
     join_existing: bool = True,
     existing_txn_policy: ExistingTxnPolicy = "error",
-    # nested: bool | None = None, TODO: Implement soon
     error_policy: ErrorPolicy = "raise",
-) -> TransactionDecorator[P, R]:
+) -> Callable[[Callable[P, R]], Callable[P, R]]:
     """Generic transaction decorator.
 
     - Each function call corresponds to a "transaction scope", unless the call
@@ -268,6 +221,7 @@ def transaction(
     """
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
+        @wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             # Obtain Session and its transaction state mapping.
             session = session_provider()

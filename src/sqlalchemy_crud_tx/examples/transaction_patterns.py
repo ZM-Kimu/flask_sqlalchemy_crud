@@ -33,7 +33,9 @@ def build_sessionmaker() -> tuple[sessionmaker[Session], Engine]:
     return sessionmaker(bind=engine, class_=Session, expire_on_commit=False), engine
 
 
-def dump_rows(session: Session) -> tuple[list[tuple[int, int]], list[tuple[int, int, int]]]:
+def dump_rows(
+    session: Session,
+) -> tuple[list[tuple[int, int]], list[tuple[int, int, int]]]:
     a_stmt = select(ModelA).order_by(ModelA.id)
     b_stmt = select(ModelB).order_by(ModelB.id)
     a_rows = [(row.id, row.age) for row in session.scalars(a_stmt).all()]
@@ -178,4 +180,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

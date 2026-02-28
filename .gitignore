@@ -1,3 +1,6 @@
+# Self Define
+tools/
+
 # --- Python / packaging ---
 __pycache__/
 *.py[cod]
