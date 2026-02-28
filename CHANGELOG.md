@@ -1,3 +1,9 @@
+## v2.0.2 (2026-02-28)
+
+### Fix
+
+- clean up typed transaction internals and contracts for 2.0.2
+
 ## v2.0.1 (2026-02-28)
 
 ### Fix
