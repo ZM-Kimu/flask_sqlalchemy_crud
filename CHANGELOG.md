@@ -1,4 +1,8 @@
-## v2.0.0 (2026-02-25)
+## v2.0.1 (2026-02-28)
+
+### Fix
+
+- replace the polluted previous release baseline with the corrected SQLAlchemy 2.x typed baseline.
 
 ### BREAKING CHANGE
 
