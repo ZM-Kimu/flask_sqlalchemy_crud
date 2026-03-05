@@ -2,14 +2,7 @@
 
 ### Feat
 
-- add async namespace CRUD API: `from sqlalchemy_crud_tx.asyncio import CRUD`.
-- add async transaction state machine with full policy parity (`error/join/savepoint/adopt_autobegin/reset`).
-- add async integration tests, typing contracts, and async example scripts.
-
-### Docs
-
-- document sync/async dual namespace usage in README and README_zh.
-- add async optional dependency group (`[asyncio]`) and CI install path.
+- **asyncio**: add async CRUD namespace and release assets
 
 ## v2.0.2 (2026-02-28)
 
