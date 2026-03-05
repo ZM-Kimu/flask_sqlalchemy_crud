@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sqlalchemy-crud-tx"
-version = "2.0.2"
+version = "2.1.0"
 description = "Use SQLAlchemy in a Pythonic way."
 readme = "README.md"
 authors = [{ name = "ZMKimu" }]
@@ -17,6 +17,7 @@ Homepage = "https://github.com/ZM-Kimu/sqlalchemy-crud-tx"
 
 [project.optional-dependencies]
 benchmark = ["pytest>=8.0", "pytest-benchmark>=4.0"]
+asyncio = ["aiosqlite>=0.20", "pytest-asyncio>=0.23"]
 
 [tool.setuptools.packages.find]
 where = ["src"]
@@ -27,3 +28,6 @@ version_provider = "pep621"
 tag_format = "v$major.$minor.$patch"
 update_changelog_on_bump = true
 changelog_file = "CHANGELOG.md"
+
+[tool.pytest.ini_options]
+asyncio_default_fixture_loop_scope = "function"

@@ -14,9 +14,46 @@ A lightweight CRUD + transaction helper for SQLAlchemy:
 pip install sqlalchemy-crud-tx
 # or local editable install
 pip install -e .
+
+# async extras (driver + async test tooling)
+pip install "sqlalchemy-crud-tx[asyncio]"
 ```
 
 Requires Python 3.11+ with `sqlalchemy>=2.0`.
+
+## Async Namespace (`sqlalchemy_crud_tx.asyncio`)
+
+The top-level import synchronous:
+`from sqlalchemy_crud_tx import CRUD`
+
+For async usage, import CRUD from the asyncio namespace:
+`from sqlalchemy_crud_tx.asyncio import CRUD`
+
+```python
+import asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy_crud_tx.asyncio import CRUD
+
+engine = create_async_engine("sqlite+aiosqlite:///./async_demo.db")
+SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+# assume User is a normal SQLAlchemy declarative model
+
+async def run():
+    CRUD.configure(session_provider=SessionLocal, error_policy="raise")
+    async with CRUD(User) as crud:
+        await crud.add(email="async@example.com")
+
+    @CRUD.transaction()
+    async def write_two() -> None:
+        async with CRUD(User) as c1:
+            await c1.add(email="a@example.com")
+        async with CRUD(User) as c2:
+            await c2.add(email="b@example.com")
+
+    await write_two()
+
+asyncio.run(run())
+```
 
 ## Quick Start (pure SQLAlchemy)
 
@@ -88,12 +125,12 @@ Legacy Query-based APIs were removed in `2.0.0`:
 
 Migration quick map:
 
-| Before | After |
-| --- | --- |
-| `crud.query().all()` | `crud.all()` or `crud.scalars(crud.select()).all()` |
-| `crud.query().filter(...).first()` | `crud.first(crud.select().where(...))` |
+| Before                                                  | After                                                  |
+| ------------------------------------------------------- | ------------------------------------------------------ |
+| `crud.query().all()`                                    | `crud.all()` or `crud.scalars(crud.select()).all()`    |
+| `crud.query().filter(...).first()`                      | `crud.first(crud.select().where(...))`                 |
 | `crud.query().with_entities(User.id, User.email).all()` | `crud.execute(crud.select(User.id, User.email)).all()` |
-| `crud.query().order_by(...).paginate(...)` | explicit `count + limit + offset` in user code |
+| `crud.query().order_by(...).paginate(...)`              | explicit `count + limit + offset` in user code         |
 
 Typing notes:
 - Runtime row attribute access like `row.email` may work.
@@ -122,6 +159,7 @@ create_two_users()
 ## Docs & Examples
 
 - Full example: `docs/examples/basic_crud.py`
+- Async example: `docs/examples/async_basic_crud.py`
 - Transaction refactor notes/TODO: `docs/crud_refactor_todo.md`
 - Typing directions: `docs/todo.md`
 

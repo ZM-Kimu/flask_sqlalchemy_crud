@@ -12,9 +12,46 @@
 pip install sqlalchemy-crud-tx
 # 或
 pip install -e .
+
+# 安装 async 可选依赖（驱动 + 测试工具）
+pip install "sqlalchemy-crud-tx[asyncio]"
 ```
 
 需要 Python 3.11+ 且 `sqlalchemy>=2.0`。
+
+## Async 命名空间（`sqlalchemy_crud_tx.asyncio`）
+
+顶层导入仍然是同步版：
+`from sqlalchemy_crud_tx import CRUD`
+
+异步版本请从 async 命名空间导入同名 `CRUD`：
+`from sqlalchemy_crud_tx.asyncio import CRUD`
+
+```python
+import asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy_crud_tx.asyncio import CRUD
+
+engine = create_async_engine("sqlite+aiosqlite:///./async_demo.db")
+SessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+# 假设 User 已按 SQLAlchemy 声明为模型
+
+async def run():
+    CRUD.configure(session_provider=SessionLocal, error_policy="raise")
+    async with CRUD(User) as crud:
+        await crud.add(email="async@example.com")
+
+    @CRUD.transaction()
+    async def write_two() -> None:
+        async with CRUD(User) as c1:
+            await c1.add(email="a@example.com")
+        async with CRUD(User) as c2:
+            await c2.add(email="b@example.com")
+
+    await write_two()
+
+asyncio.run(run())
+```
 
 ## 快速开始（纯 SQLAlchemy）
 
@@ -120,6 +157,7 @@ create_two_users()
 ## 示例与文档
 
 - 完整示例：`docs/examples/basic_crud.py`
+- Async 示例：`docs/examples/async_basic_crud.py`
 - 事务重构设计与 TODO：`docs/crud_refactor_todo.md`
 - 类型增强方向：`docs/todo.md`
 

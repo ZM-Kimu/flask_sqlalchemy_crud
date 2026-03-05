@@ -5,6 +5,8 @@ from __future__ import annotations
 from collections.abc import Callable
 from typing import Any, ClassVar, Protocol, TypeAlias, TypeVar, runtime_checkable
 
+from sqlalchemy.ext.asyncio import AsyncSession as _AsyncSession
+from sqlalchemy.ext.asyncio import async_scoped_session as _AsyncScopedSession
 from sqlalchemy.orm import Session as _Session
 from sqlalchemy.orm import scoped_session as _ScopedSession
 
@@ -31,3 +33,8 @@ ErrorLogger = Callable[..., None]
 SessionLike: TypeAlias = _Session | _ScopedSession[_Session]
 
 SessionProvider = Callable[[], SessionLike]
+
+# Async variant for the asyncio namespace APIs.
+AsyncSessionLike: TypeAlias = _AsyncSession | _AsyncScopedSession[_AsyncSession]
+
+AsyncSessionProvider = Callable[[], AsyncSessionLike]
