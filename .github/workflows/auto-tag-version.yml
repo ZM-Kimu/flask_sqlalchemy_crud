@@ -11,6 +11,7 @@ on:
 
 permissions:
     contents: write
+    actions: write
 
 jobs:
     tag-from-pyproject:
@@ -53,6 +54,17 @@ jobs:
                   git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
                   git tag -a "$TAG" -m "txn"
                   git push origin "$TAG"
+
+            - name: Trigger publish workflow for new tag
+              if: steps.exists.outputs.exists == 'false'
+              env:
+                  GH_TOKEN: ${{ github.token }}
+              run: |
+                  TAG="${{ steps.version.outputs.tag }}"
+                  gh api \
+                    repos/${{ github.repository }}/actions/workflows/publish-pypi.yml/dispatches \
+                    -f ref="$TAG" \
+                    -f inputs[tag]="$TAG"
 
             - name: Skip when tag exists
               if: steps.exists.outputs.exists == 'true'

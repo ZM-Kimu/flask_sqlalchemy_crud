@@ -4,6 +4,12 @@ on:
     push:
         tags:
             - "v*" # 例如 v1.2.3、v0.3.0-rc.1
+    workflow_dispatch:
+        inputs:
+            tag:
+                description: "Tag to publish (e.g. v1.0.0)"
+                required: false
+                type: string
 
 permissions:
     contents: write
@@ -12,11 +18,14 @@ permissions:
 jobs:
     build-and-publish:
         runs-on: ubuntu-latest
+        env:
+            RELEASE_TAG: ${{ github.event.inputs.tag || github.ref_name }}
 
         steps:
             - uses: actions/checkout@v4
               with:
                   fetch-depth: 0
+                  ref: ${{ env.RELEASE_TAG }}
 
             - name: Set up Python
               uses: actions/setup-python@v5
@@ -37,7 +46,7 @@ jobs:
 
             - name: Verify version matches tag
               run: |
-                  TAG="${GITHUB_REF_NAME#v}"
+                  TAG="${RELEASE_TAG#v}"
                   PYPROJ_VER=$(python - <<'PY'
                   import tomllib
                   with open("pyproject.toml","rb") as f:
@@ -52,7 +61,7 @@ jobs:
             - name: Determine release channel
               id: channel
               run: |
-                  REF="${GITHUB_REF_NAME}"
+                  REF="${RELEASE_TAG}"
                   echo "ref_name=$REF"
                   if [[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
                     echo "final=true" >> "$GITHUB_OUTPUT"
@@ -76,6 +85,7 @@ jobs:
               id: gh_release
               uses: softprops/action-gh-release@v2
               with:
+                  tag_name: ${{ env.RELEASE_TAG }}
                   generate_release_notes: true # 自动用 commit 生成说明
               env:
                   GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
