@@ -24,8 +24,9 @@ from sqlalchemy import select as sa_select
 from sqlalchemy import tuple_ as sa_tuple
 from sqlalchemy.engine import CursorResult, Result, ScalarResult
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.ext.asyncio import AsyncSessionTransaction
-from sqlalchemy.orm import Mapper, object_session
+from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
+from sqlalchemy.orm import Mapper, Session, object_session
+from sqlalchemy.orm.state import InstanceState
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import TypedReturnsRows
@@ -131,6 +132,7 @@ class CRUD(Generic[ModelTypeVar]):
         self._explicit_committed = False
         self._discarded = False
         self._session: AsyncSessionLike | None = None
+        self._owns_provider_session = False
 
     def resolve_error_policy(self) -> ErrorPolicy:
         from_ctx = get_current_error_policy()
@@ -146,6 +148,7 @@ class CRUD(Generic[ModelTypeVar]):
         state = get_txn_state(session)
         joined_existing = bool(state is not None and state.active)
         in_txn = in_transaction(session)
+        entered_with_existing_txn = in_txn
         origin_name = get_txn_origin_name(session) if in_txn else None
 
         if joined_existing and not in_txn and state is not None:
@@ -186,6 +189,9 @@ class CRUD(Generic[ModelTypeVar]):
         self._joined_existing = joined_existing
         self._explicit_committed = False
         self._discarded = False
+        self._owns_provider_session = (
+            not entered_with_existing_txn and not joined_existing
+        )
         return self
 
     @classmethod
@@ -571,7 +577,7 @@ class CRUD(Generic[ModelTypeVar]):
 
                     primary_key_names: list[str] = []
                     for pk in primary_keys:
-                        pk_key = getattr(pk, "key", None)
+                        pk_key = pk.key
                         if not isinstance(pk_key, str):
                             self.status = SQLStatus.INTERNAL_ERR
                             return False
@@ -628,7 +634,7 @@ class CRUD(Generic[ModelTypeVar]):
     async def commit(self) -> None:
         try:
             session = self._require_session()
-            if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+            if self._nested_txn is not None and self._nested_txn.is_active:
                 await self._nested_txn.commit()
             else:
                 await session.commit()
@@ -642,7 +648,7 @@ class CRUD(Generic[ModelTypeVar]):
     async def discard(self) -> None:
         try:
             session = self._require_session()
-            if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+            if self._nested_txn is not None and self._nested_txn.is_active:
                 await self._nested_txn.rollback()
             else:
                 await session.rollback()
@@ -654,8 +660,10 @@ class CRUD(Generic[ModelTypeVar]):
     def logger(self) -> ErrorLogger:
         return self._logger
 
-    def _log(self, error: Exception, status: SQLStatus = SQLStatus.INTERNAL_ERR) -> None:
-        model_name = getattr(self._model, "__name__", str(self._model))
+    def _log(
+        self, error: Exception, status: SQLStatus = SQLStatus.INTERNAL_ERR
+    ) -> None:
+        model_name = self._model.__name__
         self._logger(
             "CRUD[%s]: <catch: %s> <except: (%s)>",
             model_name,
@@ -671,13 +679,15 @@ class CRUD(Generic[ModelTypeVar]):
     ) -> None:
         if self.error and not isinstance(self.error, SQLAlchemyError):
             raise self.error
+        session_to_close: AsyncSessionLike | None = None
+        should_close_owned_session = False
         try:
             has_exc = bool(exc_type or exc_val or exc_tb)
             should_rollback = has_exc or self.error is not None or self._discarded
 
             if should_rollback:
                 if has_exc or self.error:
-                    model_name = getattr(self._model, "__name__", str(self._model))
+                    model_name = self._model.__name__
                     self._logger(
                         "CRUD[%s]: <catch: %s> <except: (%s: %s)>",
                         model_name,
@@ -685,7 +695,7 @@ class CRUD(Generic[ModelTypeVar]):
                         exc_type,
                         exc_val,
                     )
-                if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+                if self._nested_txn is not None and self._nested_txn.is_active:
                     try:
                         await self._nested_txn.rollback()
                     except Exception:
@@ -693,9 +703,7 @@ class CRUD(Generic[ModelTypeVar]):
                 self._need_commit = False
             elif self._need_commit and not self._explicit_committed:
                 try:
-                    if self._nested_txn and getattr(
-                        self._nested_txn, "is_active", False
-                    ):
+                    if self._nested_txn is not None and self._nested_txn.is_active:
                         await self._nested_txn.commit()
                 except Exception as exc:
                     self._logger("CRUD sub-txn commit failed: %s", exc)
@@ -703,8 +711,12 @@ class CRUD(Generic[ModelTypeVar]):
 
             if self._session is not None:
                 session = self._session
+                session_to_close = session
                 state = get_txn_state(session)
-                joined_existing = getattr(self, "_joined_existing", False)
+                joined_existing = self._joined_existing
+                should_close_owned_session = (
+                    self._owns_provider_session and not joined_existing
+                )
 
                 if state is not None and state.active:
                     state.depth -= 1
@@ -727,7 +739,12 @@ class CRUD(Generic[ModelTypeVar]):
                             except Exception:
                                 pass
                             raise
+                    else:
+                        should_close_owned_session = False
         finally:
+            if should_close_owned_session and session_to_close is not None:
+                await self._close_managed_session(session_to_close)
+            self._owns_provider_session = False
             self._session = None
 
     async def _ensure_nested_txn(self) -> None:
@@ -741,15 +758,20 @@ class CRUD(Generic[ModelTypeVar]):
     async def _merge_if_needed(
         self, session: AsyncSessionLike, instance: ModelTypeVar
     ) -> ModelTypeVar:
-        insp = cast(Any, sa_inspect(instance))
+        insp = cast(InstanceState[ModelTypeVar], sa_inspect(instance))
         bound_sess = object_session(instance)
-        session_sync = getattr(session, "sync_session", None)
+        session_sync = self._resolve_sync_session(session)
         need_merge = (not insp.transient) or (
             bound_sess is not None and bound_sess is not session_sync
         )
         if need_merge:
             return await session.merge(instance)
         return instance
+
+    def _resolve_sync_session(self, session: AsyncSessionLike) -> Session:
+        if isinstance(session, AsyncSession):
+            return session.sync_session
+        return session().sync_session
 
     def _validate_update_fields(
         self, instance: ModelTypeVar, updates: dict[str, Any]
@@ -774,7 +796,7 @@ class CRUD(Generic[ModelTypeVar]):
         self.status = SQLStatus.SQL_ERR
         try:
             session = self._require_session()
-            if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+            if self._nested_txn is not None and self._nested_txn.is_active:
                 await self._nested_txn.rollback()
             else:
                 await session.rollback()
@@ -783,6 +805,16 @@ class CRUD(Generic[ModelTypeVar]):
         self._need_commit = False
         if self.resolve_error_policy() == "raise":
             raise e
+
+    async def _close_managed_session(self, session: AsyncSessionLike) -> None:
+        try:
+            if isinstance(session, AsyncSession):
+                await session.close()
+                return
+            await session.remove()
+            return
+        except Exception:
+            self._logger("CRUD session close failed", exc_info=True)
 
     @classmethod
     def transaction(

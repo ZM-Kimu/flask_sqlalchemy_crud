@@ -25,6 +25,7 @@ from sqlalchemy import tuple_ as sa_tuple
 from sqlalchemy.engine import CursorResult, Result, ScalarResult
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Mapper, SessionTransaction, object_session
+from sqlalchemy.orm.state import InstanceState
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import TypedReturnsRows
@@ -690,7 +691,7 @@ class CRUD(Generic[ModelTypeVar]):
 
                     primary_key_names: list[str] = []
                     for pk in primary_keys:
-                        pk_key = getattr(pk, "key", None)
+                        pk_key = pk.key
                         if not isinstance(pk_key, str):
                             self.status = SQLStatus.INTERNAL_ERR
                             return False
@@ -758,7 +759,7 @@ class CRUD(Generic[ModelTypeVar]):
         """
         try:
             session = self._require_session()
-            if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+            if self._nested_txn is not None and self._nested_txn.is_active:
                 self._nested_txn.commit()
             else:
                 session.commit()
@@ -778,7 +779,7 @@ class CRUD(Generic[ModelTypeVar]):
         """
         try:
             session = self._require_session()
-            if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+            if self._nested_txn is not None and self._nested_txn.is_active:
                 self._nested_txn.rollback()
             else:
                 session.rollback()
@@ -793,7 +794,7 @@ class CRUD(Generic[ModelTypeVar]):
 
     def _log(self, error: Exception, status: SQLStatus = SQLStatus.INTERNAL_ERR):
         """Log an error related to the current model."""
-        model_name = getattr(self._model, "__name__", str(self._model))
+        model_name = self._model.__name__
         self._logger(
             "CRUD[%s]: <catch: %s> <except: (%s)>",
             model_name,
@@ -818,7 +819,7 @@ class CRUD(Generic[ModelTypeVar]):
 
             if should_rollback:
                 if has_exc or self.error:
-                    model_name = getattr(self._model, "__name__", str(self._model))
+                    model_name = self._model.__name__
                     self._logger(
                         "CRUD[%s]: <catch: %s> <except: (%s: %s)>",
                         model_name,
@@ -826,7 +827,7 @@ class CRUD(Generic[ModelTypeVar]):
                         exc_type,
                         exc_val,
                     )
-                if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+                if self._nested_txn is not None and self._nested_txn.is_active:
                     try:
                         self._nested_txn.rollback()
                     except Exception:
@@ -835,9 +836,7 @@ class CRUD(Generic[ModelTypeVar]):
                 self._need_commit = False
             elif self._need_commit and not self._explicit_committed:
                 try:
-                    if self._nested_txn and getattr(
-                        self._nested_txn, "is_active", False
-                    ):
+                    if self._nested_txn is not None and self._nested_txn.is_active:
                         self._nested_txn.commit()
                 except Exception as exc:
                     self._logger("CRUD sub-txn commit failed: %s", exc)
@@ -848,7 +847,7 @@ class CRUD(Generic[ModelTypeVar]):
             if self._session is not None:
                 session = self._session
                 state = get_txn_state(session)
-                joined_existing = getattr(self, "_joined_existing", False)
+                joined_existing = self._joined_existing
 
                 if state is not None and state.active:
                     state.depth -= 1
@@ -888,7 +887,7 @@ class CRUD(Generic[ModelTypeVar]):
         self, session: SessionLike, instance: ModelTypeVar
     ) -> ModelTypeVar:
         """Attach an instance to the current Session when necessary."""
-        insp = cast(Any, sa_inspect(instance))
+        insp = cast(InstanceState[ModelTypeVar], sa_inspect(instance))
         bound_sess = object_session(instance)
         need_merge = (not insp.transient) or (
             bound_sess is not None and bound_sess is not session
@@ -923,7 +922,7 @@ class CRUD(Generic[ModelTypeVar]):
         self.status = SQLStatus.SQL_ERR
         try:
             session = self._require_session()
-            if self._nested_txn and getattr(self._nested_txn, "is_active", False):
+            if self._nested_txn is not None and self._nested_txn.is_active:
                 self._nested_txn.rollback()
             else:
                 session.rollback()

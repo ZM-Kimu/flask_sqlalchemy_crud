@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextvars import ContextVar
 from functools import wraps
-from typing import Any, Literal, ParamSpec, TypeAlias, TypeVar, cast
+from typing import Literal, ParamSpec, TypeAlias, TypeVar, cast
 
 from sqlalchemy.exc import InvalidRequestError, SQLAlchemyError
+from sqlalchemy.orm import Session, SessionTransaction
 
 from .types import SessionLike, SessionProvider
 
@@ -91,16 +92,11 @@ def get_current_error_policy() -> ErrorPolicy | None:
         return None
 
 
-def _resolve_session(session: SessionLike) -> Any:
-    """Return a real Session instance from a SessionLike value."""
-    if hasattr(session, "in_transaction") or hasattr(session, "get_transaction"):
+def _resolve_session(session: SessionLike) -> Session:
+    """Return a concrete ``Session`` from a ``SessionLike`` value."""
+    if isinstance(session, Session):
         return session
-    if callable(session):
-        try:
-            return session()
-        except Exception:
-            return session
-    return session
+    return session()
 
 
 def in_transaction(session: SessionLike) -> bool:
@@ -112,7 +108,7 @@ def in_transaction(session: SessionLike) -> bool:
         return False
 
 
-def _get_transaction(session: SessionLike) -> Any | None:
+def _get_transaction(session: SessionLike) -> SessionTransaction | None:
     """Return the current transaction object for a Session, if any."""
     session_obj = _resolve_session(session)
     try:
@@ -126,10 +122,16 @@ def get_txn_origin_name(session: SessionLike) -> str | None:
     txn = _get_transaction(session)
     if txn is None:
         return None
-    origin = getattr(txn, "origin", None)
+    try:
+        origin = txn.origin
+    except Exception:
+        origin = None
     if origin is None:
         return None
-    name = getattr(origin, "name", None)
+    try:
+        name = origin.name
+    except Exception:
+        name = None
     if name:
         return name
     return str(origin).split(".")[-1]
@@ -175,7 +177,7 @@ def activate_txn_state(session: SessionLike) -> TxnState:
 def begin_session(session: SessionLike, state: TxnState) -> None:
     """Begin a transaction and mark state inactive on failure."""
     try:
-        session.begin()
+        _resolve_session(session).begin()
     except Exception:
         state.active = False
         raise
@@ -191,7 +193,7 @@ def reset_existing_txn(
             origin=origin,
             detail="Pending changes found; reset is unsafe.",
         )
-    session.rollback()
+    _resolve_session(session).rollback()
 
 
 def transaction(

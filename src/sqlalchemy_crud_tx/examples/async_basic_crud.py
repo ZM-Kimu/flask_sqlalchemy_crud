@@ -6,8 +6,12 @@ import asyncio
 
 from sqlalchemy import Integer, String
 from sqlalchemy import select as sa_select
-from sqlalchemy.ext.asyncio import AsyncEngine
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import (
+    AsyncEngine,
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from sqlalchemy_crud_tx.asyncio import CRUD
@@ -27,7 +31,9 @@ async def init_db() -> tuple[
     AsyncSession,
     AsyncEngine,
 ]:
-    engine = create_async_engine("sqlite+aiosqlite:///./crud_async_example.db", echo=False)
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///./crud_async_example.db", echo=False
+    )
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)

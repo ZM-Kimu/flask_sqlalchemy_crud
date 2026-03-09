@@ -6,9 +6,10 @@ import inspect
 from collections.abc import Awaitable, Callable
 from contextvars import ContextVar
 from functools import wraps
-from typing import Any, Literal, ParamSpec, TypeAlias, TypeVar, cast
+from typing import Literal, ParamSpec, TypeAlias, TypeVar, cast
 
 from sqlalchemy.exc import InvalidRequestError, SQLAlchemyError
+from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
 
 from ..types import AsyncSessionLike, AsyncSessionProvider
 
@@ -74,15 +75,10 @@ def get_current_error_policy() -> ErrorPolicy | None:
         return None
 
 
-def _resolve_session(session: AsyncSessionLike) -> Any:
-    if hasattr(session, "in_transaction") or hasattr(session, "get_transaction"):
+def _resolve_session(session: AsyncSessionLike) -> AsyncSession:
+    if isinstance(session, AsyncSession):
         return session
-    if callable(session):
-        try:
-            return session()
-        except Exception:
-            return session
-    return session
+    return session()
 
 
 def in_transaction(session: AsyncSessionLike) -> bool:
@@ -93,7 +89,7 @@ def in_transaction(session: AsyncSessionLike) -> bool:
         return False
 
 
-def _get_transaction(session: AsyncSessionLike) -> Any | None:
+def _get_transaction(session: AsyncSessionLike) -> AsyncSessionTransaction | None:
     session_obj = _resolve_session(session)
     try:
         return session_obj.get_transaction()
@@ -106,15 +102,22 @@ def get_txn_origin_name(session: AsyncSessionLike) -> str | None:
     if txn is None:
         return None
 
-    origin = getattr(txn, "origin", None)
-    if origin is None:
-        sync_txn = getattr(txn, "sync_transaction", None)
-        if sync_txn is not None:
-            origin = getattr(sync_txn, "origin", None)
-
-    if origin is None:
+    try:
+        sync_txn = txn.sync_transaction
+    except Exception:
         return None
-    name = getattr(origin, "name", None)
+    if sync_txn is None:
+        return None
+
+    try:
+        origin = sync_txn.origin
+    except Exception:
+        return None
+
+    try:
+        name = origin.name
+    except Exception:
+        name = None
     if name:
         return name
     return str(origin).split(".")[-1]
@@ -156,7 +159,7 @@ def activate_txn_state(session: AsyncSessionLike) -> TxnState:
 
 async def begin_session(session: AsyncSessionLike, state: TxnState) -> None:
     try:
-        await session.begin()
+        await _resolve_session(session).begin()
     except Exception:
         state.active = False
         raise
@@ -171,7 +174,19 @@ async def reset_existing_txn(
             origin=origin,
             detail="Pending changes found; reset is unsafe.",
         )
-    await session.rollback()
+    await _resolve_session(session).rollback()
+
+
+async def _close_managed_session(session: AsyncSessionLike) -> None:
+    try:
+        if isinstance(session, AsyncSession):
+            await session.close()
+            return
+        await session.remove()
+        return
+    except Exception:
+        # Closing must not mask business exceptions raised by wrapped function.
+        pass
 
 
 def transaction(
@@ -198,6 +213,7 @@ def transaction(
             session = session_provider()
             state = get_txn_state(session)
             in_txn = in_transaction(session)
+            entered_with_existing_txn = in_txn
             origin_name = get_txn_origin_name(session) if in_txn else None
 
             if state is not None and state.active and not in_txn:
@@ -206,6 +222,9 @@ def transaction(
 
             joining_existing = bool(
                 join_existing and state is not None and state.active
+            )
+            should_close_session = (
+                not entered_with_existing_txn and not joining_existing
             )
             adopted_external = False
             nested_txn = None
@@ -307,6 +326,8 @@ def transaction(
             finally:
                 if token is not None:
                     _current_error_policy.reset(token)
+                if should_close_session:
+                    await _close_managed_session(session)
 
         return wrapper
 

@@ -5,7 +5,8 @@ This script is intended for manual runtime checks and IDE type-hint inspection.
 
 from __future__ import annotations
 
-from sqlalchemy import Boolean, Integer, String, create_engine, func, select as sa_select
+from sqlalchemy import Boolean, Integer, String, create_engine, func
+from sqlalchemy import select as sa_select
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
 
@@ -139,7 +140,9 @@ def demo_full_api() -> None:
         @CRUD.transaction(error_policy="raise")
         def write_pair(age: int, score: int) -> None:
             with CRUD(User, tenant_id=1) as users:
-                user = users.add(email=f"tx-{age}@example.com", age=age, is_deleted=False)
+                user = users.add(
+                    email=f"tx-{age}@example.com", age=age, is_deleted=False
+                )
                 assert user is not None
                 with CRUD(Score, tenant_id=1) as scores:
                     scores.add(user_id=user.id, value=score)
@@ -148,7 +151,10 @@ def demo_full_api() -> None:
 
         with CRUD(User) as users:
             final_users = users.all(stmt=users.select(pure=True).order_by(User.id))
-            print("final users:", [(u.id, u.email, u.age, u.tenant_id) for u in final_users])
+            print(
+                "final users:",
+                [(u.id, u.email, u.age, u.tenant_id) for u in final_users],
+            )
 
         with CRUD(Score) as scores:
             final_scores = scores.all(stmt=scores.select(pure=True).order_by(Score.id))

@@ -32,6 +32,14 @@ class SAUser(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
 
 
+class TrackingAsyncSession(AsyncSession):
+    closed_session_ids: set[int] = set()
+
+    async def close(self) -> None:
+        type(self).closed_session_ids.add(id(self))
+        await super().close()
+
+
 @pytest_asyncio.fixture(scope="function")
 async def async_sa_session() -> AsyncGenerator[AsyncSession, None]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False, future=True)
@@ -52,6 +60,152 @@ async def async_sa_session() -> AsyncGenerator[AsyncSession, None]:
 
 def test_sync_and_async_crud_are_distinct_classes() -> None:
     assert SyncCRUD is not CRUD
+
+
+@pytest.mark.asyncio
+async def test_async_crud_closes_provider_owned_session() -> None:
+    TrackingAsyncSession.closed_session_ids.clear()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False, future=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    SessionLocal = async_sessionmaker(
+        bind=engine,
+        class_=TrackingAsyncSession,
+        expire_on_commit=False,
+    )
+
+    created_session_ids: list[int] = []
+
+    def provider() -> TrackingAsyncSession:
+        session = SessionLocal()
+        created_session_ids.append(id(session))
+        return session
+
+    CRUD.configure(session_provider=provider, error_policy="raise")
+
+    async with CRUD(SAUser) as crud:
+        created = await crud.add(email="owned-close-1@example.com")
+        assert created is not None
+
+    async with CRUD(SAUser) as crud:
+        created = await crud.add(email="owned-close-2@example.com")
+        assert created is not None
+
+    assert created_session_ids
+    assert set(created_session_ids).issubset(TrackingAsyncSession.closed_session_ids)
+
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_async_crud_join_does_not_close_external_session() -> None:
+    TrackingAsyncSession.closed_session_ids.clear()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False, future=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    SessionLocal = async_sessionmaker(
+        bind=engine,
+        class_=TrackingAsyncSession,
+        expire_on_commit=False,
+    )
+    external_session = SessionLocal()
+
+    try:
+        CRUD.configure(
+            session_provider=lambda: external_session,
+            existing_txn_policy="join",
+            error_policy="raise",
+        )
+
+        outer_tx = await external_session.begin()
+        try:
+            async with CRUD(SAUser) as crud:
+                created = await crud.add(email="join-no-close@example.com")
+                assert created is not None
+            assert id(external_session) not in TrackingAsyncSession.closed_session_ids
+        finally:
+            if outer_tx.is_active:
+                await outer_tx.rollback()
+    finally:
+        await external_session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_async_transaction_closes_provider_owned_session() -> None:
+    TrackingAsyncSession.closed_session_ids.clear()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False, future=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    SessionLocal = async_sessionmaker(
+        bind=engine,
+        class_=TrackingAsyncSession,
+        expire_on_commit=False,
+    )
+    created_session_ids: list[int] = []
+
+    def provider() -> TrackingAsyncSession:
+        session = SessionLocal()
+        created_session_ids.append(id(session))
+        return session
+
+    CRUD.configure(session_provider=provider, error_policy="raise")
+
+    @CRUD.transaction()
+    async def noop() -> None:
+        return None
+
+    await noop()
+    await noop()
+
+    assert created_session_ids
+    assert set(created_session_ids).issubset(TrackingAsyncSession.closed_session_ids)
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_async_transaction_join_does_not_close_external_session() -> None:
+    TrackingAsyncSession.closed_session_ids.clear()
+
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False, future=True)
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    SessionLocal = async_sessionmaker(
+        bind=engine,
+        class_=TrackingAsyncSession,
+        expire_on_commit=False,
+    )
+    external_session = SessionLocal()
+
+    try:
+        CRUD.configure(
+            session_provider=lambda: external_session,
+            existing_txn_policy="join",
+            error_policy="raise",
+        )
+
+        @CRUD.transaction()
+        async def noop_in_join_txn() -> None:
+            return None
+
+        outer_tx = await external_session.begin()
+        try:
+            await noop_in_join_txn()
+            assert id(external_session) not in TrackingAsyncSession.closed_session_ids
+            assert outer_tx.is_active
+        finally:
+            if outer_tx.is_active:
+                await outer_tx.rollback()
+    finally:
+        await external_session.close()
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
