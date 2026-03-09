@@ -1,3 +1,9 @@
+## v2.2.0 (2026-03-09)
+
+### Fix
+
+- **asyncio**: close provider-owned sessions and tighten transaction typing
+
 ## v2.1.0 (2026-03-05)
 
 ### Feat
