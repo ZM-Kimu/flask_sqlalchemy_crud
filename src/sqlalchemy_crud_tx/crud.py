@@ -24,7 +24,7 @@ from sqlalchemy import select as sa_select
 from sqlalchemy import tuple_ as sa_tuple
 from sqlalchemy.engine import CursorResult, Result, ScalarResult
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Mapper, SessionTransaction, object_session
+from sqlalchemy.orm import Mapper, Session, SessionTransaction, object_session
 from sqlalchemy.orm.state import InstanceState
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
@@ -156,6 +156,7 @@ class CRUD(Generic[ModelTypeVar]):
         self._explicit_committed = False
         self._discarded = False
         self._session: SessionLike | None = None
+        self._owns_provider_session = False
 
     def resolve_error_policy(self) -> ErrorPolicy:
         """Resolve the effective ``error_policy`` for this CRUD instance.
@@ -179,6 +180,7 @@ class CRUD(Generic[ModelTypeVar]):
         state = get_txn_state(session)
         joined_existing = bool(state is not None and state.active)
         in_txn = in_transaction(session)
+        entered_with_existing_txn = in_txn
         origin_name = get_txn_origin_name(session) if in_txn else None
 
         if joined_existing and not in_txn and state is not None:
@@ -220,6 +222,9 @@ class CRUD(Generic[ModelTypeVar]):
         self._joined_existing = joined_existing
         self._explicit_committed = False
         self._discarded = False
+        self._owns_provider_session = (
+            not entered_with_existing_txn and not joined_existing
+        )
         return self
 
     @classmethod
@@ -813,6 +818,8 @@ class CRUD(Generic[ModelTypeVar]):
         # and handled by the transaction decorator or ``_on_sql_error``.
         if self.error and not isinstance(self.error, SQLAlchemyError):
             raise self.error
+        session_to_close: SessionLike | None = None
+        should_close_owned_session = False
         try:
             has_exc = bool(exc_type or exc_val or exc_tb)
             should_rollback = has_exc or self.error is not None or self._discarded
@@ -846,8 +853,12 @@ class CRUD(Generic[ModelTypeVar]):
             # scope performs commit/rollback on the Session.
             if self._session is not None:
                 session = self._session
+                session_to_close = session
                 state = get_txn_state(session)
                 joined_existing = self._joined_existing
+                should_close_owned_session = (
+                    self._owns_provider_session and not joined_existing
+                )
 
                 if state is not None and state.active:
                     state.depth -= 1
@@ -870,9 +881,23 @@ class CRUD(Generic[ModelTypeVar]):
                             except Exception:
                                 pass
                             raise
+                    else:
+                        should_close_owned_session = False
         finally:
-            # Session lifecycle is owned by the outer application/framework.
+            if should_close_owned_session and session_to_close is not None:
+                self._close_managed_session(session_to_close)
+            self._owns_provider_session = False
             self._session = None
+
+    def _close_managed_session(self, session: SessionLike) -> None:
+        try:
+            if isinstance(session, Session):
+                session.close()
+                return
+            session.remove()
+            return
+        except Exception:
+            self._logger("CRUD session close failed", exc_info=True)
 
     def _ensure_nested_txn(self) -> None:
         """Ensure there is an active SAVEPOINT / nested transaction if possible."""

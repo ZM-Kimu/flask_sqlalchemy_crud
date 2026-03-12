@@ -31,6 +31,14 @@ class SAUser(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
 
 
+class TrackingSession(Session):
+    closed_session_ids: set[int] = set()
+
+    def close(self) -> None:
+        type(self).closed_session_ids.add(id(self))
+        super().close()
+
+
 @pytest.fixture(scope="function")
 def sa_session() -> Generator[Session, None, None]:
     engine = create_engine("sqlite:///:memory:", echo=False, future=True)
@@ -41,6 +49,143 @@ def sa_session() -> Generator[Session, None, None]:
         yield session
     finally:
         session.close()
+        engine.dispose()
+
+
+def test_sync_crud_closes_provider_owned_session() -> None:
+    TrackingSession.closed_session_ids.clear()
+
+    engine = create_engine("sqlite:///:memory:", echo=False, future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(
+        bind=engine,
+        class_=TrackingSession,
+        expire_on_commit=False,
+    )
+    created_session_ids: list[int] = []
+
+    def provider() -> TrackingSession:
+        session = SessionLocal()
+        created_session_ids.append(id(session))
+        return session
+
+    try:
+        CRUD.configure(session_provider=provider, error_policy="raise")
+
+        with CRUD(SAUser) as crud:
+            created = crud.add(email="owned-close-1@example.com")
+            assert created is not None
+
+        with CRUD(SAUser) as crud:
+            created = crud.add(email="owned-close-2@example.com")
+            assert created is not None
+
+        assert created_session_ids
+        assert set(created_session_ids).issubset(TrackingSession.closed_session_ids)
+    finally:
+        engine.dispose()
+
+
+def test_sync_crud_join_does_not_close_external_session() -> None:
+    TrackingSession.closed_session_ids.clear()
+
+    engine = create_engine("sqlite:///:memory:", echo=False, future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(
+        bind=engine,
+        class_=TrackingSession,
+        expire_on_commit=False,
+    )
+    external_session = SessionLocal()
+
+    try:
+        CRUD.configure(
+            session_provider=lambda: external_session,
+            existing_txn_policy="join",
+            error_policy="raise",
+        )
+
+        outer_tx = external_session.begin()
+        try:
+            with CRUD(SAUser) as crud:
+                created = crud.add(email="join-no-close@example.com")
+                assert created is not None
+
+            assert id(external_session) not in TrackingSession.closed_session_ids
+        finally:
+            if outer_tx.is_active:
+                outer_tx.rollback()
+    finally:
+        external_session.close()
+        engine.dispose()
+
+
+def test_sync_transaction_closes_provider_owned_session() -> None:
+    TrackingSession.closed_session_ids.clear()
+
+    engine = create_engine("sqlite:///:memory:", echo=False, future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(
+        bind=engine,
+        class_=TrackingSession,
+        expire_on_commit=False,
+    )
+    created_session_ids: list[int] = []
+
+    def provider() -> TrackingSession:
+        session = SessionLocal()
+        created_session_ids.append(id(session))
+        return session
+
+    try:
+        CRUD.configure(session_provider=provider, error_policy="raise")
+
+        @CRUD.transaction()
+        def noop() -> None:
+            return None
+
+        noop()
+        noop()
+
+        assert created_session_ids
+        assert set(created_session_ids).issubset(TrackingSession.closed_session_ids)
+    finally:
+        engine.dispose()
+
+
+def test_sync_transaction_join_does_not_close_external_session() -> None:
+    TrackingSession.closed_session_ids.clear()
+
+    engine = create_engine("sqlite:///:memory:", echo=False, future=True)
+    Base.metadata.create_all(engine)
+    SessionLocal = sessionmaker(
+        bind=engine,
+        class_=TrackingSession,
+        expire_on_commit=False,
+    )
+    external_session = SessionLocal()
+
+    try:
+        CRUD.configure(
+            session_provider=lambda: external_session,
+            existing_txn_policy="join",
+            error_policy="raise",
+        )
+
+        @CRUD.transaction()
+        def noop_in_join_txn() -> None:
+            return None
+
+        outer_tx = external_session.begin()
+        try:
+            noop_in_join_txn()
+            assert id(external_session) not in TrackingSession.closed_session_ids
+            assert outer_tx.is_active
+        finally:
+            if outer_tx.is_active:
+                outer_tx.rollback()
+    finally:
+        external_session.close()
         engine.dispose()
 
 
@@ -126,7 +271,7 @@ def test_existing_txn_policy_adopt_autobegin() -> None:
             user = crud.add(email="autobegin@example.com")
             assert user is not None
 
-        _ = user.email
+        _ = session.scalar(sa_select(func.count(SAUser.id)))
         assert session.in_transaction()
 
         with CRUD(SAUser) as crud:

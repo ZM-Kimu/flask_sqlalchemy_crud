@@ -196,6 +196,18 @@ def reset_existing_txn(
     _resolve_session(session).rollback()
 
 
+def _close_managed_session(session: SessionLike) -> None:
+    try:
+        if isinstance(session, Session):
+            session.close()
+            return
+        session.remove()
+        return
+    except Exception:
+        # Closing must not mask business exceptions raised by wrapped function.
+        pass
+
+
 def transaction(
     session_provider: SessionProvider,
     *,
@@ -229,6 +241,7 @@ def transaction(
             session = session_provider()
             state = get_txn_state(session)
             in_txn = in_transaction(session)
+            entered_with_existing_txn = in_txn
             origin_name = get_txn_origin_name(session) if in_txn else None
 
             if state is not None and state.active and not in_txn:
@@ -240,6 +253,7 @@ def transaction(
             joining_existing = bool(
                 join_existing and state is not None and state.active
             )
+            should_close_session = not entered_with_existing_txn and not joining_existing
             adopted_external = False
             nested_txn = None
 
@@ -350,6 +364,8 @@ def transaction(
             finally:
                 if token is not None:
                     _current_error_policy.reset(token)
+                if should_close_session:
+                    _close_managed_session(session)
 
         return wrapper
 
