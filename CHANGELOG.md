@@ -1,3 +1,13 @@
+## v2.2.1 (2026-03-12)
+
+### Fix
+
+- **sync**: align session ownership lifecycle with asyncio behavior
+
+### Refactor
+
+- reorganize internal package layout and test contracts
+
 ## v2.2.0 (2026-03-09)
 
 ### Fix
