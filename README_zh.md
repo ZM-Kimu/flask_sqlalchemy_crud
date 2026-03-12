@@ -156,10 +156,12 @@ create_two_users()
 
 ## 示例与文档
 
-- 完整示例：`docs/examples/basic_crud.py`
-- Async 示例：`docs/examples/async_basic_crud.py`
-- 事务重构设计与 TODO：`docs/crud_refactor_todo.md`
-- 类型增强方向：`docs/todo.md`
+- 完整示例：`src/sqlalchemy_crud_tx/examples/basic_crud.py`
+- Async 示例：`src/sqlalchemy_crud_tx/examples/async_basic_crud.py`
+- 混合 API 示例：`src/sqlalchemy_crud_tx/examples/mixed_full_api.py`
+- 事务模式示例：`src/sqlalchemy_crud_tx/examples/transaction_patterns.py`
+- 历史事务重构记录：`docs/archive/crud_refactor_todo.md`
+- 历史类型方向记录：`docs/archive/todo.md`
 
 ## 运行测试
 

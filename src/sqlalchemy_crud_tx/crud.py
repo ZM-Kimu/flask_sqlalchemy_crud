@@ -18,30 +18,30 @@ from typing import (
     overload,
 )
 
-from sqlalchemy import delete as sa_delete
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy import select as sa_select
-from sqlalchemy import tuple_ as sa_tuple
 from sqlalchemy.engine import CursorResult, Result, ScalarResult
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.orm import Mapper, Session, SessionTransaction, object_session
+from sqlalchemy.orm import Session, SessionTransaction, object_session
 from sqlalchemy.orm.state import InstanceState
 from sqlalchemy.sql import Select
-from sqlalchemy.sql.elements import ColumnElement
 from sqlalchemy.sql.selectable import TypedReturnsRows
 
+from ._internal.crud_helpers import (
+    apply_updates,
+    build_bulk_delete_statement,
+    build_instance_payload,
+    build_select_statement,
+    log_model_error,
+    needs_merge,
+    resolve_error_policy,
+)
+from ._internal.crud_runtime import enter_crud_scope, exit_crud_scope
+from ._internal.session_proxy import SessionProxy
 from .status import SQLStatus
 from .transaction import (
     ErrorPolicy,
     ExistingTxnPolicy,
-    activate_txn_state,
-    begin_session,
     get_current_error_policy,
-    get_txn_origin_name,
-    get_txn_state,
-    in_transaction,
-    raise_existing_txn_error,
-    reset_existing_txn,
 )
 from .transaction import transaction as _txn_transaction
 from .types import ErrorLogger, ORMModel, SessionLike, SessionProvider
@@ -62,40 +62,6 @@ EntityTypeVar7 = TypeVar("EntityTypeVar7")
 EntityTypeVar8 = TypeVar("EntityTypeVar8")
 
 _DEFAULT_LOGGER: ErrorLogger = logging.getLogger("CRUD").error
-
-
-class SessionProxy:
-    """Session facade exposed to callers.
-
-    - Delegates most methods directly to the underlying Session.
-    - commit/rollback calls are redirected to CRUD.commit / CRUD.discard
-      to avoid bypassing the CRUD transaction state machine.
-    """
-
-    __slots__ = ("_crud", "_session")
-
-    def __init__(self, crud: "CRUD[Any]", session: SessionLike) -> None:
-        self._crud = crud
-        self._session = session
-
-    def commit(self) -> None:
-        """Redirect to CRUD.commit with a warning."""
-        self._crud.logger(
-            "CRUD.session.commit() is redirected to CRUD.commit(); "
-            "consider calling CRUD.commit() explicitly.",
-        )
-        self._crud.commit()
-
-    def rollback(self) -> None:
-        """Redirect to CRUD.discard with a warning."""
-        self._crud.logger(
-            "CRUD.session.rollback() is redirected to CRUD.discard(); "
-            "consider calling CRUD.discard() explicitly.",
-        )
-        self._crud.discard()
-
-    def __getattr__(self, name: str) -> Any:
-        return getattr(self._session, name)
 
 
 if TYPE_CHECKING:
@@ -166,65 +132,26 @@ class CRUD(Generic[ModelTypeVar]):
         2. Per-instance configuration (``config``);
         3. Class-level default configuration (``_default_error_policy``).
         """
-        from_ctx = get_current_error_policy()
-        if from_ctx is not None:
-            return from_ctx
-        if self._error_policy is not None:
-            return self._error_policy
-        return self._default_error_policy
+        return resolve_error_policy(
+            get_current_error_policy(),
+            self._error_policy,
+            self._default_error_policy,
+        )
 
     def __enter__(self) -> Self:
         """Enter the context manager and join or create a transaction scope."""
         session = self._get_session()
-
-        state = get_txn_state(session)
-        joined_existing = bool(state is not None and state.active)
-        in_txn = in_transaction(session)
-        entered_with_existing_txn = in_txn
-        origin_name = get_txn_origin_name(session) if in_txn else None
-
-        if joined_existing and not in_txn and state is not None:
-            # Stale internal state; reset so policy can re-evaluate.
-            state.active = False
-            joined_existing = False
-
-        if not joined_existing:
-            if in_txn:
-                policy = type(self)._existing_txn_policy
-                if policy == "error":
-                    raise_existing_txn_error(policy=policy, origin=origin_name)
-                if policy == "join":
-                    joined_existing = True
-                elif policy == "savepoint":
-                    joined_existing = True
-                    self._nested_txn = session.begin_nested()
-                elif policy == "adopt_autobegin":
-                    if origin_name != "AUTOBEGIN":
-                        raise_existing_txn_error(policy=policy, origin=origin_name)
-                elif policy == "reset":
-                    reset_existing_txn(
-                        session,
-                        policy=policy,
-                        origin=origin_name,
-                    )
-                    in_txn = False
-                else:
-                    raise ValueError(f"Unsupported existing_txn_policy: {policy}")
-
-            state = activate_txn_state(session)
-            if not (joined_existing or in_txn):
-                begin_session(session, state)
-
-        assert state is not None
-        state.depth += 1
+        runtime_state = enter_crud_scope(
+            session=session,
+            existing_txn_policy=type(self)._existing_txn_policy,
+        )
 
         self._session = session
-        self._joined_existing = joined_existing
+        self._joined_existing = runtime_state.joined_existing
         self._explicit_committed = False
         self._discarded = False
-        self._owns_provider_session = (
-            not entered_with_existing_txn and not joined_existing
-        )
+        self._nested_txn = runtime_state.nested_txn
+        self._owns_provider_session = runtime_state.owns_provider_session
         return self
 
     @classmethod
@@ -332,8 +259,7 @@ class CRUD(Generic[ModelTypeVar]):
         This method is intentionally stateless: every call returns a new,
         unattached model instance.
         """
-        payload = dict(self._kwargs)
-        payload.update(kwargs)
+        payload = build_instance_payload(self._kwargs, kwargs)
         return self._model(**payload)
 
     def add(
@@ -367,7 +293,11 @@ class CRUD(Generic[ModelTypeVar]):
                 target = self.create_instance(**kwargs)
             else:
                 target = self._merge_if_needed(session, instance)
-                self._apply_updates(session, target, kwargs)
+                apply_updates(
+                    instance=target,
+                    updates=kwargs,
+                    no_autoflush=session.no_autoflush,
+                )
 
             session.add(target)
             session.flush()
@@ -406,7 +336,11 @@ class CRUD(Generic[ModelTypeVar]):
             managed_instances: list[ModelTypeVar] = []
             for instance in instances:
                 target = self._merge_if_needed(session, instance)
-                self._apply_updates(session, target, kwargs)
+                apply_updates(
+                    instance=target,
+                    updates=kwargs,
+                    no_autoflush=session.no_autoflush,
+                )
                 managed_instances.append(target)
 
             session.add_all(managed_instances)
@@ -580,18 +514,16 @@ class CRUD(Generic[ModelTypeVar]):
         By default, instance-level and global base filters are applied; pass
         ``pure=True`` to skip those defaults.
         """
-        statement = sa_select(*entities) if entities else sa_select(self._model)
-        if not pure:
-            if self._instance_default_kwargs:
-                statement = statement.filter_by(**self._instance_default_kwargs)
-            if self._apply_global_filters:
-                if self._base_filter_exprs:
-                    statement = statement.where(*self._base_filter_exprs)
-                if self._base_filter_kwargs:
-                    statement = statement.filter_by(**self._base_filter_kwargs)
-        if kwargs:
-            statement = statement.filter_by(**kwargs)
-        return cast(Select[Any], statement)
+        return build_select_statement(
+            model=self._model,
+            entities=entities,
+            pure=pure,
+            instance_default_kwargs=self._instance_default_kwargs,
+            apply_global_filters=self._apply_global_filters,
+            base_filter_exprs=self._base_filter_exprs,
+            base_filter_kwargs=self._base_filter_kwargs,
+            runtime_kwargs=kwargs,
+        )
 
     def execute(
         self,
@@ -656,7 +588,11 @@ class CRUD(Generic[ModelTypeVar]):
             session = self._require_session()
             self._ensure_nested_txn()
             target = self._merge_if_needed(session, target_instance)
-            self._apply_updates(session, target, kwargs)
+            apply_updates(
+                instance=target,
+                updates=kwargs,
+                no_autoflush=session.no_autoflush,
+            )
             self._need_commit = True
             return target
         except SQLAlchemyError as exc:
@@ -682,45 +618,14 @@ class CRUD(Generic[ModelTypeVar]):
             else:
                 effective_stmt = stmt if stmt is not None else self.select()
                 if all_records:
-                    mapper = cast(Mapper[ModelTypeVar] | None, sa_inspect(self._model))
-                    if mapper is None:
-                        self.status = SQLStatus.INTERNAL_ERR
-                        return False
-
-                    primary_keys: list[ColumnElement[Any]] = [
-                        col for col in mapper.primary_key
-                    ]
-                    if not primary_keys:
-                        self.status = SQLStatus.INTERNAL_ERR
-                        return False
-
-                    primary_key_names: list[str] = []
-                    for pk in primary_keys:
-                        pk_key = pk.key
-                        if not isinstance(pk_key, str):
-                            self.status = SQLStatus.INTERNAL_ERR
-                            return False
-                        primary_key_names.append(pk_key)
-
-                    pk_source = effective_stmt.with_only_columns(
-                        *primary_keys
-                    ).subquery()
-                    if len(primary_keys) == 1:
-                        pk = primary_keys[0]
-                        source_pk = cast(
-                            ColumnElement[Any], pk_source.c[primary_key_names[0]]
+                    try:
+                        delete_stmt = build_bulk_delete_statement(
+                            self._model, effective_stmt
                         )
-                        delete_condition = pk.in_(sa_select(source_pk))
-                    else:
-                        model_pk = sa_tuple(*primary_keys)
-                        source_pk_cols: list[ColumnElement[Any]] = [
-                            cast(ColumnElement[Any], pk_source.c[pk_name])
-                            for pk_name in primary_key_names
-                        ]
-                        delete_condition = model_pk.in_(sa_select(*source_pk_cols))
-
+                    except ValueError:
+                        self.status = SQLStatus.INTERNAL_ERR
+                        return False
                     self._ensure_nested_txn()
-                    delete_stmt = sa_delete(self._model).where(delete_condition)
                     delete_result = cast(
                         CursorResult[Any], session.execute(delete_stmt)
                     )
@@ -799,13 +704,7 @@ class CRUD(Generic[ModelTypeVar]):
 
     def _log(self, error: Exception, status: SQLStatus = SQLStatus.INTERNAL_ERR):
         """Log an error related to the current model."""
-        model_name = self._model.__name__
-        self._logger(
-            "CRUD[%s]: <catch: %s> <except: (%s)>",
-            model_name,
-            error,
-            status,
-        )
+        log_model_error(self._logger, self._model.__name__, error, status)
 
     def __exit__(
         self,
@@ -818,74 +717,24 @@ class CRUD(Generic[ModelTypeVar]):
         # and handled by the transaction decorator or ``_on_sql_error``.
         if self.error and not isinstance(self.error, SQLAlchemyError):
             raise self.error
-        session_to_close: SessionLike | None = None
-        should_close_owned_session = False
         try:
-            has_exc = bool(exc_type or exc_val or exc_tb)
-            should_rollback = has_exc or self.error is not None or self._discarded
-
-            if should_rollback:
-                if has_exc or self.error:
-                    model_name = self._model.__name__
-                    self._logger(
-                        "CRUD[%s]: <catch: %s> <except: (%s: %s)>",
-                        model_name,
-                        self.error,
-                        exc_type,
-                        exc_val,
-                    )
-                if self._nested_txn is not None and self._nested_txn.is_active:
-                    try:
-                        self._nested_txn.rollback()
-                    except Exception:
-                        # Log and continue to top-level rollback handling.
-                        self._logger("CRUD sub-txn rollback failed", exc_info=True)
-                self._need_commit = False
-            elif self._need_commit and not self._explicit_committed:
-                try:
-                    if self._nested_txn is not None and self._nested_txn.is_active:
-                        self._nested_txn.commit()
-                except Exception as exc:
-                    self._logger("CRUD sub-txn commit failed: %s", exc)
-                    raise
-
-            # Adjust depth via the shared transaction state; only the outermost
-            # scope performs commit/rollback on the Session.
-            if self._session is not None:
-                session = self._session
-                session_to_close = session
-                state = get_txn_state(session)
-                joined_existing = self._joined_existing
-                should_close_owned_session = (
-                    self._owns_provider_session and not joined_existing
-                )
-
-                if state is not None and state.active:
-                    state.depth -= 1
-                    is_outermost = state.depth <= 0
-                    if is_outermost:
-                        state.active = False
-                        try:
-                            if should_rollback and not joined_existing:
-                                session.rollback()
-                            elif (
-                                self._need_commit
-                                and not self._explicit_committed
-                                and not joined_existing
-                            ):
-                                session.commit()
-                        except Exception as exc:
-                            self._logger("CRUD commit/rollback failed: %s", exc)
-                            try:
-                                session.rollback()
-                            except Exception:
-                                pass
-                            raise
-                    else:
-                        should_close_owned_session = False
+            exit_crud_scope(
+                model_name=self._model.__name__,
+                logger=self._logger,
+                session=self._session,
+                nested_txn=self._nested_txn,
+                need_commit=self._need_commit,
+                explicit_committed=self._explicit_committed,
+                joined_existing=self._joined_existing,
+                owns_provider_session=self._owns_provider_session,
+                discarded=self._discarded,
+                error=self.error,
+                exc_type=exc_type,
+                exc_val=exc_val,
+                exc_tb=exc_tb,
+                close_session=self._close_managed_session,
+            )
         finally:
-            if should_close_owned_session and session_to_close is not None:
-                self._close_managed_session(session_to_close)
             self._owns_provider_session = False
             self._session = None
 
@@ -914,32 +763,13 @@ class CRUD(Generic[ModelTypeVar]):
         """Attach an instance to the current Session when necessary."""
         insp = cast(InstanceState[ModelTypeVar], sa_inspect(instance))
         bound_sess = object_session(instance)
-        need_merge = (not insp.transient) or (
-            bound_sess is not None and bound_sess is not session
-        )
-        if need_merge:
+        if needs_merge(
+            state=insp,
+            bound_session=bound_sess,
+            current_session=session,
+        ):
             return session.merge(instance)
         return instance
-
-    def _validate_update_fields(
-        self, instance: ModelTypeVar, updates: dict[str, Any]
-    ) -> None:
-        """Fail fast on unknown attributes to avoid silent no-op writes."""
-        model_type = type(instance)
-        for key in updates:
-            if not hasattr(model_type, key):
-                raise AttributeError(f"{model_type.__name__} has no attribute '{key}'")
-
-    def _apply_updates(
-        self, session: SessionLike, instance: ModelTypeVar, updates: dict[str, Any]
-    ) -> None:
-        """Apply field updates under no_autoflush to avoid premature flushes."""
-        if not updates:
-            return
-        self._validate_update_fields(instance, updates)
-        with session.no_autoflush:
-            for key, value in updates.items():
-                setattr(instance, key, value)
 
     def _on_sql_error(self, e: Exception) -> None:
         """Handle a ``SQLAlchemyError`` and optionally re-raise it."""

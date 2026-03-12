@@ -5,24 +5,20 @@ from __future__ import annotations
 from collections.abc import Callable
 from contextvars import ContextVar
 from functools import wraps
-from typing import Literal, ParamSpec, TypeAlias, TypeVar, cast
+from typing import ParamSpec, TypeAlias, TypeVar, cast
 
-from sqlalchemy.exc import InvalidRequestError, SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session, SessionTransaction
 
+from ._internal.transaction_common import (
+    ErrorPolicy,
+    ExistingTxnPolicy,
+    raise_existing_txn_error,
+)
 from .types import SessionLike, SessionProvider
 
 P = ParamSpec("P")
 R = TypeVar("R")
-
-ErrorPolicy = Literal["raise", "status_only"]
-ExistingTxnPolicy = Literal[
-    "error",
-    "join",
-    "savepoint",
-    "adopt_autobegin",
-    "reset",
-]
 
 
 class TxnState:
@@ -144,26 +140,6 @@ def _has_pending_changes(session: SessionLike) -> bool:
         return bool(session_obj.new or session_obj.dirty or session_obj.deleted)
     except Exception:
         return False
-
-
-def raise_existing_txn_error(
-    *,
-    policy: ExistingTxnPolicy,
-    origin: str | None,
-    detail: str | None = None,
-) -> None:
-    """Raise a consistent InvalidRequestError for existing transaction conflicts."""
-    origin_label = origin or "UNKNOWN"
-    hint = (
-        "Configure CRUD.configure(existing_txn_policy='join'|'savepoint'|"
-        "'adopt_autobegin'|'reset') to change this behavior."
-    )
-    detail_text = f" {detail}" if detail else ""
-    raise InvalidRequestError(
-        "Session already has an active transaction "
-        f"(origin={origin_label}). existing_txn_policy='{policy}' "
-        f"disallows this operation.{detail_text} {hint}"
-    )
 
 
 def activate_txn_state(session: SessionLike) -> TxnState:

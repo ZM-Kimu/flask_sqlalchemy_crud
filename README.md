@@ -158,10 +158,12 @@ create_two_users()
 
 ## Docs & Examples
 
-- Full example: `docs/examples/basic_crud.py`
-- Async example: `docs/examples/async_basic_crud.py`
-- Transaction refactor notes/TODO: `docs/crud_refactor_todo.md`
-- Typing directions: `docs/todo.md`
+- Full example: `src/sqlalchemy_crud_tx/examples/basic_crud.py`
+- Async example: `src/sqlalchemy_crud_tx/examples/async_basic_crud.py`
+- Mixed API example: `src/sqlalchemy_crud_tx/examples/mixed_full_api.py`
+- Transaction patterns: `src/sqlalchemy_crud_tx/examples/transaction_patterns.py`
+- Archived transaction refactor notes: `docs/archive/crud_refactor_todo.md`
+- Archived typing directions: `docs/archive/todo.md`
 
 ## Testing
 

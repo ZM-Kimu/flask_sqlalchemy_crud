@@ -15,6 +15,5 @@
 
 ## 3. 类型与文档同步（P2）
 
-- [ ] 与 `docs/todo.md` 对齐 2.x 类型路线：以 `select/execute/scalars/scalar` 为核心，不再扩展旧 Query 路径。
+- [ ] 与 `docs/archive/todo.md` 对齐 2.x 类型路线：以 `select/execute/scalars/scalar` 为核心，不再扩展旧 Query 路径。
 - [ ] 补充 `@CRUD.transaction` 的签名契约示例，防止未来改动导致类型退化。
-
