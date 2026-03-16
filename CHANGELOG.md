@@ -1,3 +1,9 @@
+## v2.2.2 (2026-03-16)
+
+### Fix
+
+- **types**: widen executable overload support for statement helpers
+
 ## v2.2.1 (2026-03-12)
 
 ### Fix
