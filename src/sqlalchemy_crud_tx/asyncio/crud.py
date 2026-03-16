@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from types import TracebackType
 from typing import (
     TYPE_CHECKING,
@@ -25,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, AsyncSessionTransaction
 from sqlalchemy.orm import Session, object_session
 from sqlalchemy.orm.state import InstanceState
 from sqlalchemy.sql import Select
+from sqlalchemy.sql.base import Executable
 from sqlalchemy.sql.selectable import TypedReturnsRows
 
 from .._internal.crud_helpers import (
@@ -40,11 +41,7 @@ from ..status import SQLStatus
 from ..types import AsyncSessionLike, AsyncSessionProvider, ErrorLogger, ORMModel
 from ._internal.crud_runtime import enter_crud_scope, exit_crud_scope
 from ._internal.session_proxy import AsyncSessionProxy
-from .transaction import (
-    ErrorPolicy,
-    ExistingTxnPolicy,
-    get_current_error_policy,
-)
+from .transaction import ErrorPolicy, ExistingTxnPolicy, get_current_error_policy
 from .transaction import transaction as _txn_transaction
 
 P = ParamSpec("P")
@@ -63,6 +60,10 @@ EntityTypeVar7 = TypeVar("EntityTypeVar7")
 EntityTypeVar8 = TypeVar("EntityTypeVar8")
 
 _DEFAULT_LOGGER: ErrorLogger = logging.getLogger("CRUD").error
+
+ExecuteParams: TypeAlias = Sequence[Mapping[str, Any]] | Mapping[str, Any] | None
+ExecutionOptions: TypeAlias = Mapping[str, Any] | None
+BindArguments: TypeAlias = dict[str, Any] | None
 
 
 if TYPE_CHECKING:
@@ -419,32 +420,120 @@ class CRUD(Generic[ModelTypeVar]):
             runtime_kwargs=kwargs,
         )
 
+    @overload
     async def execute(
         self,
         statement: TypedReturnsRows[RowTypeVar],
-        *args: Any,
-        **kwargs: Any,
-    ) -> Result[RowTypeVar]:
-        session = self._require_session()
-        return await session.execute(statement, *args, **kwargs)
+        params: ExecuteParams = None,
+        *,
+        execution_options: ExecutionOptions = None,
+        bind_arguments: BindArguments = None,
+    ) -> Result[RowTypeVar]: ...
 
+    @overload
+    async def execute(  # type: ignore[misc, overload-cannot-match]
+        self,
+        statement: Executable,
+        params: ExecuteParams = None,
+        *,
+        execution_options: ExecutionOptions = None,
+        bind_arguments: BindArguments = None,
+    ) -> Result[Any]: ...
+
+    async def execute(
+        self,
+        statement: Executable,
+        params: ExecuteParams = None,
+        *,
+        execution_options: ExecutionOptions = None,
+        bind_arguments: BindArguments = None,
+        **kwargs: Any,
+    ) -> Result[Any]:
+        session = self._require_session()
+        execute_kwargs = dict(kwargs)
+        if execution_options is not None:
+            execute_kwargs["execution_options"] = execution_options
+        if bind_arguments is not None:
+            execute_kwargs["bind_arguments"] = bind_arguments
+        return await session.execute(statement, params=params, **execute_kwargs)
+
+    @overload
     async def scalars(
         self,
         statement: TypedReturnsRows[tuple[ScalarTypeVar]],
-        *args: Any,
+        params: ExecuteParams = None,
+        *,
+        execution_options: ExecutionOptions = None,
+        bind_arguments: BindArguments = None,
         **kwargs: Any,
-    ) -> ScalarResult[ScalarTypeVar]:
-        session = self._require_session()
-        return await session.scalars(statement, *args, **kwargs)
+    ) -> ScalarResult[ScalarTypeVar]: ...
 
+    @overload
+    async def scalars(  # type: ignore[misc, overload-cannot-match]
+        self,
+        statement: Executable,
+        params: ExecuteParams = None,
+        *,
+        execution_options: ExecutionOptions = None,
+        bind_arguments: BindArguments = None,
+        **kwargs: Any,
+    ) -> ScalarResult[Any]: ...
+
+    async def scalars(
+        self,
+        statement: Executable,
+        params: ExecuteParams = None,
+        *,
+        execution_options: ExecutionOptions = None,
+        bind_arguments: BindArguments = None,
+        **kwargs: Any,
+    ) -> ScalarResult[Any]:
+        session = self._require_session()
+        scalar_kwargs = dict(kwargs)
+        if execution_options is not None:
+            scalar_kwargs["execution_options"] = execution_options
+        if bind_arguments is not None:
+            scalar_kwargs["bind_arguments"] = bind_arguments
+        return await session.scalars(statement, params=params, **scalar_kwargs)
+
+    @overload
     async def scalar(
         self,
         statement: TypedReturnsRows[tuple[ScalarTypeVar]],
-        *args: Any,
+        params: ExecuteParams = None,
+        *,
+        execution_options: ExecutionOptions = None,
+        bind_arguments: BindArguments = None,
         **kwargs: Any,
-    ) -> ScalarTypeVar | None:
+    ) -> ScalarTypeVar | None: ...
+
+    @overload
+    async def scalar(  # type: ignore[misc, overload-cannot-match]
+        self,
+        statement: Executable,
+        params: ExecuteParams = None,
+        *,
+        execution_options: ExecutionOptions = None,
+        bind_arguments: BindArguments = None,
+        **kwargs: Any,
+    ) -> Any: ...
+
+    async def scalar(
+        self,
+        statement: Executable,
+        params: ExecuteParams = None,
+        *,
+        execution_options: ExecutionOptions = None,
+        bind_arguments: BindArguments = None,
+        **kwargs: Any,
+    ) -> Any:
         session = self._require_session()
-        return await session.scalar(statement, *args, **kwargs)
+        scalar_kwargs = dict(kwargs)
+        if execution_options is not None:
+            scalar_kwargs["execution_options"] = execution_options
+        if bind_arguments is not None:
+            scalar_kwargs["bind_arguments"] = bind_arguments
+        return await session.scalar(statement, params=params, **scalar_kwargs)
 
     async def first(
         self, stmt: Select[tuple[ModelTypeVar]] | None = None

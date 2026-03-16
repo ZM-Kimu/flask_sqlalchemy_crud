@@ -3,7 +3,7 @@ import sys
 from typing import Generator
 
 import pytest
-from sqlalchemy import Integer, String, create_engine, func
+from sqlalchemy import Integer, String, create_engine, func, insert, text
 from sqlalchemy import select as sa_select
 from sqlalchemy.orm import (
     DeclarativeBase,
@@ -458,6 +458,25 @@ def test_sqlalchemy2_style_select_execute_scalars(sa_session: Session) -> None:
         count_stmt = sa_select(func.count(SAUser.id))
         scalar_val = crud.scalar(count_stmt)
         assert scalar_val == 2
+
+
+def test_new_api_execute_accepts_dml_and_text(sa_session: Session) -> None:
+    """execute/scalars/scalar should accept generic Executable statements."""
+    CRUD.configure(session_provider=lambda: sa_session, error_policy="raise")
+
+    with CRUD(SAUser) as crud:
+        insert_result = crud.execute(
+            insert(SAUser).values(email="execute-dml@example.com")
+        )
+        crud.mark_for_commit()
+        assert insert_result is not None
+
+    with CRUD(SAUser) as crud:
+        text_scalars = crud.scalars(text("select email from sa_user"))
+        assert text_scalars.all() == ["execute-dml@example.com"]
+
+        text_scalar = crud.scalar(text("select count(*) from sa_user"))
+        assert text_scalar == 1
 
 
 def test_legacy_query_api_removed(sa_session: Session) -> None:

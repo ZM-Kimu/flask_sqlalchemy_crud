@@ -229,7 +229,9 @@ def transaction(
             joining_existing = bool(
                 join_existing and state is not None and state.active
             )
-            should_close_session = not entered_with_existing_txn and not joining_existing
+            should_close_session = (
+                not entered_with_existing_txn and not joining_existing
+            )
             adopted_external = False
             nested_txn = None
 

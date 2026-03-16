@@ -6,7 +6,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import Integer, String, func
+from sqlalchemy import Integer, String, func, insert, text
 from sqlalchemy import select as sa_select
 from sqlalchemy.exc import InvalidRequestError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
@@ -439,3 +439,28 @@ async def test_async_sqlalchemy2_style_select_execute_scalars(
         count_stmt = sa_select(func.count(SAUser.id))
         scalar_val = await crud.scalar(count_stmt)
         assert scalar_val == 2
+
+
+@pytest.mark.asyncio
+async def test_new_api_execute_accepts_dml_and_text(
+    async_sa_session: AsyncSession,
+) -> None:
+    """execute/scalars/scalar should accept generic Executable statements."""
+    CRUD.configure(
+        session_provider=lambda: async_sa_session,
+        error_policy="raise",
+    )
+
+    async with CRUD(SAUser) as crud:
+        insert_result = await crud.execute(
+            insert(SAUser).values(email="execute-dml@example.com")
+        )
+        await crud.mark_for_commit()
+        assert insert_result is not None
+
+    async with CRUD(SAUser) as crud:
+        text_scalars = await crud.scalars(text("select email from sa_async_user"))
+        assert text_scalars.all() == ["execute-dml@example.com"]
+
+        text_scalar = await crud.scalar(text("select count(*) from sa_async_user"))
+        assert text_scalar == 1

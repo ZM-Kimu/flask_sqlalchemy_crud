@@ -16,9 +16,9 @@ from sqlalchemy.sql import Select
 from sqlalchemy.sql.dml import Delete
 from sqlalchemy.sql.elements import ColumnElement
 
-from .transaction_common import ErrorPolicy
 from ..status import SQLStatus
 from ..types import ErrorLogger, ORMModel
+from .transaction_common import ErrorPolicy
 
 ModelTypeVar = TypeVar("ModelTypeVar", bound=ORMModel)
 

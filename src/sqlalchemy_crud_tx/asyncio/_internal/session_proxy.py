@@ -21,9 +21,7 @@ class AsyncSessionProxy:
 
     __slots__ = ("_crud", "_session")
 
-    def __init__(
-        self, crud: _AsyncCRUDSessionOwner, session: AsyncSessionLike
-    ) -> None:
+    def __init__(self, crud: _AsyncCRUDSessionOwner, session: AsyncSessionLike) -> None:
         self._crud = crud
         self._session = session
 

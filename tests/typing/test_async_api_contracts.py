@@ -3,9 +3,10 @@ from __future__ import annotations
 import pathlib
 import sys
 from collections.abc import Sequence
-from typing import TYPE_CHECKING, assert_type
+from typing import TYPE_CHECKING, Any, assert_type
 
-from sqlalchemy import Integer, String, func
+from sqlalchemy import Integer, String, func, insert, text
+from sqlalchemy.engine import Result, ScalarResult
 from sqlalchemy import select as sa_select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -43,5 +44,15 @@ if TYPE_CHECKING:
             count_stmt = sa_select(func.count(User.id))
             count_value = await c.scalar(count_stmt)
             assert_type(count_value, int | None)
+
+            insert_stmt = insert(User).values(email="typed@example.com")
+            insert_result = await c.execute(insert_stmt)
+            assert_type(insert_result, Result[Any])
+
+            text_scalars = await c.scalars(text("select 1"))
+            assert_type(text_scalars, ScalarResult[Any])
+
+            text_scalar = await c.scalar(text("select 1"))
+            assert_type(text_scalar, Any)
 
     _ = _contracts
